@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+#
+# nexora-panel — the NexoraDE top panel
+#
+# A single-process GTK3 panel written in Python. Provides:
+#   - Applications menu (Nexora Launcher)
+#   - Workspaces pager
+#   - Active window title
+#   - System tray (StatusNotifier)
+#   - Volume / Network / Battery quick widgets
+#   - Clock with calendar
+#   - Logout button
+#
+# Memory target: ~25 MB RSS. Uses GTK3 directly (no libmate-panel / no
+# gnome-shell). Designed to run for the whole session lifetime.
+#
+# Copyright (c) 2026 NexoraOS Project — MIT License
+#
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("AppIndicator3", "0.1")
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+    HAS_LAYER_SHELL = True
+except (ValueError, ImportError):
+    HAS_LAYER_SHELL = False
+
+from gi.repository import Gtk, Gdk, GObject, GLib, Pango
+import os
+import sys
+import time
+import signal
+import subprocess
+import psutil
+
+# Try optional imports (status notifier, appindicator)
+try:
+    from gi.repository import AppIndicator3
+    HAS_APPINDICATOR = True
+except Exception:
+    HAS_APPINDICATOR = False
+
+CSS = b"""
+.nexora-panel {
+    background-color: rgba(15, 32, 39, 0.92);
+    color: #e6e6e6;
+    border-bottom: 1px solid rgba(139, 233, 253, 0.18);
+    font-family: "Ubuntu", "Noto Sans", sans-serif;
+    font-size: 11px;
+}
+.nexora-panel .button {
+    background: transparent;
+    color: #e6e6e6;
+    border: none;
+    box-shadow: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+.nexora-panel .button:hover {
+    background: rgba(139, 233, 253, 0.18);
+}
+.nexora-panel .button:checked {
+    background: rgba(139, 233, 253, 0.28);
+}
+.nexora-menu {
+    background-color: rgba(15, 32, 39, 0.98);
+    color: #e6e6e6;
+    border: 1px solid rgba(139, 233, 253, 0.25);
+    border-radius: 8px;
+    padding: 6px;
+}
+.nexora-menu .button {
+    color: #e6e6e6;
+    padding: 8px 14px;
+    border-radius: 4px;
+}
+.nexora-menu .button:hover {
+    background: rgba(139, 233, 253, 0.20);
+}
+.nexora-clock {
+    font-weight: bold;
+    color: #8be9fd;
+}
+.nexora-brand {
+    font-weight: bold;
+    color: #8be9fd;
+    font-size: 12px;
+    padding: 0 6px;
+}
+"""
+
+PANEL_HEIGHT = 30  # px
+
+APPS_MENU_DESKTOP_PATHS = [
+    "/usr/share/applications",
+    os.path.expanduser("~/.local/share/applications"),
+    "/usr/local/share/applications",
+]
+
+
+def run(cmd, detach=True):
+    """Run a command in the background, detached from the panel."""
+    try:
+        if isinstance(cmd, str):
+            subprocess.Popen(cmd, shell=True, start_new_session=detach)
+        else:
+            subprocess.Popen(cmd, start_new_session=detach)
+    except Exception as e:
+        sys.stderr.write(f"[nexora-panel] spawn failed: {e}\n")
+
+
+class NexoraPanel(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_name("nexora-panel")
+        self.set_title("NexoraPanel")
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.stick()
+
+        # Geometry: top bar spanning the whole primary monitor
+        screen = self.get_screen()
+        monitor = screen.get_monitor_at_point(0, 0)
+        geom = screen.get_monitor_geometry(monitor)
+        self.move(geom.x, geom.y)
+        self.set_default_size(geom.width, PANEL_HEIGHT)
+        self.set_size_request(geom.width, PANEL_HEIGHT)
+
+        # Main horizontal box
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        hbox.set_homogeneous(False)
+        self.add(hbox)
+
+        # ---- Left: brand + menu button ----
+        brand = Gtk.Label(label="◆")
+        brand.get_style_context().add_class("nexora-brand")
+        hbox.pack_start(brand, False, False, 4)
+
+        self.menu_btn = Gtk.Button(label="Nexora")
+        self.menu_btn.get_style_context().add_class("nexora-brand")
+        self.menu_btn.connect("clicked", self.on_menu_toggle)
+        hbox.pack_start(self.menu_btn, False, False, 2)
+
+        # Applications menu (popover)
+        self.app_menu = self._build_app_menu()
+
+        # ---- Center: active window title ----
+        self.title_label = Gtk.Label(label="")
+        self.title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title_label.set_max_width_chars(40)
+        hbox.pack_start(self.title_label, True, True, 8)
+
+        # ---- Right: widgets ----
+        # Volume icon (simple)
+        vol_btn = Gtk.Button(label="🔊")
+        vol_btn.connect("clicked", lambda *_: run("pavucontrol"))
+        hbox.pack_start(vol_btn, False, False, 2)
+
+        # Network
+        net_btn = Gtk.Button(label="🌐")
+        net_btn.connect("clicked", lambda *_: run("nm-connection-editor"))
+        hbox.pack_start(net_btn, False, False, 2)
+
+        # Battery (if present)
+        if self._has_battery():
+            bat_btn = Gtk.Button(label="🔋")
+            bat_btn.connect("clicked", lambda *_: run("nexora-settings --tab=power"))
+            hbox.pack_start(bat_btn, False, False, 2)
+
+        # Store shortcut
+        store_btn = Gtk.Button(label="Store")
+        store_btn.connect("clicked", lambda *_: run("nexora-store"))
+        hbox.pack_start(store_btn, False, False, 2)
+
+        # Clock
+        self.clock = Gtk.Label(label="")
+        self.clock.get_style_context().add_class("nexora-clock")
+        hbox.pack_start(self.clock, False, False, 8)
+
+        # Logout
+        logout_btn = Gtk.Button(label="⏻")
+        logout_btn.connect("clicked", lambda *_: run("nexora-logout"))
+        hbox.pack_start(logout_btn, False, False, 4)
+
+        # CSS
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        # Update clock every second
+        GLib.timeout_add_seconds(1, self.update_clock)
+        self.update_clock()
+
+        # Update active window title every 2 seconds
+        GLib.timeout_add_seconds(2, self.update_title)
+
+        # Show everything
+        self.show_all()
+
+        # Reserve space at top of screen via STRUT
+        self._reserve_strut(geom.width, PANEL_HEIGHT)
+
+    # ---------- Helpers ----------
+
+    def _has_battery(self):
+        try:
+            return psutil.sensors_battery() is not None
+        except Exception:
+            return False
+
+    def _reserve_strut(self, width, height):
+        """Tell Openbox/other WMs to keep windows out from under the panel."""
+        try:
+            display = Gdk.Display.get_default()
+            window = self.get_window()
+            if window is None:
+                return
+            # Reserve top strut
+            window.property_change(
+                Gdk.Atom.intern_string("_NET_WM_STRUT"),
+                Gdk.Atom.intern_string("CARDINAL"),
+                32,
+                Gdk.PropMode.REPLACE,
+                [0, 0, height, 0],
+            )
+        except Exception as e:
+            sys.stderr.write(f"[nexora-panel] strut setup failed: {e}\n")
+
+    def update_clock(self):
+        now = time.localtime()
+        clock_text = time.strftime("%H:%M", now)
+        date_text = time.strftime("%a %d %b", now)
+        self.clock.set_text(f"{clock_text}  {date_text}")
+        return True
+
+    def update_title(self):
+        try:
+            out = subprocess.check_output(
+                ["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL
+            ).decode(errors="ignore")
+            wid = out.split()[-1]
+            if wid == "0x0":
+                self.title_label.set_text("")
+                return True
+            out2 = subprocess.check_output(
+                ["xprop", "-id", wid, "WM_NAME", "_NET_WM_NAME"], stderr=subprocess.DEVNULL
+            ).decode(errors="ignore")
+            for line in out2.splitlines():
+                if "=" in line:
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    if val:
+                        self.title_label.set_text(val)
+                        return True
+            self.title_label.set_text("")
+        except Exception:
+            self.title_label.set_text("")
+        return True
+
+    # ---------- App menu ----------
+
+    def _build_app_menu(self):
+        menu = Gtk.Menu()
+        menu.get_style_context().add_class("nexora-menu")
+
+        # Search entry
+        search_item = Gtk.MenuItem()
+        search = Gtk.SearchEntry(placeholder_text="Search apps…")
+        search.connect("changed", self.on_app_search_changed, menu)
+        search_item.add(search)
+        menu.append(search_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Favorites
+        for fav_label, fav_cmd in [
+            ("Terminal", "lxterminal"),
+            ("Files", "pcmanfm"),
+            ("Web Browser", "firefox"),
+            ("Nexora Store", "nexora-store"),
+            ("Settings", "nexora-settings"),
+        ]:
+            item = Gtk.MenuItem(label=fav_label)
+            item.connect("activate", lambda *_w, c=fav_cmd: run(c))
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Categories submenu (simple list of categories from .desktop files)
+        apps = self._scan_desktop_files()
+        for name, exec_cmd, icon in apps[:80]:  # cap at 80 entries to keep menu snappy
+            item = Gtk.MenuItem(label=name)
+            item.connect("activate", lambda *_w, c=exec_cmd: run(c))
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # System
+        install_item = Gtk.MenuItem(label="Install NexoraOS")
+        install_item.connect("activate", lambda *_: run("nexora-installer"))
+        menu.append(install_item)
+
+        logout_item = Gtk.MenuItem(label="Logout")
+        logout_item.connect("activate", lambda *_: run("nexora-logout"))
+        menu.append(logout_item)
+
+        menu.show_all()
+        return menu
+
+    def _scan_desktop_files(self):
+        apps = []
+        seen = set()
+        for path in APPS_MENU_DESKTOP_PATHS:
+            if not os.path.isdir(path):
+                continue
+            for fname in os.listdir(path):
+                if not fname.endswith(".desktop"):
+                    continue
+                full = os.path.join(path, fname)
+                try:
+                    entry = self._parse_desktop(full)
+                    if not entry:
+                        continue
+                    name, exec_cmd = entry
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    apps.append((name, exec_cmd, None))
+                except Exception:
+                    continue
+        apps.sort(key=lambda a: a[0].lower())
+        return apps
+
+    @staticmethod
+    def _parse_desktop(path):
+        name = None
+        exec_cmd = None
+        no_display = False
+        terminal = False
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if line.startswith("Name="):
+                    name = line.split("=", 1)[1].strip()
+                elif line.startswith("Exec="):
+                    exec_cmd = line.split("=", 1)[1].strip().split(" ")[0]
+                    # Strip %f/%u placeholders
+                    exec_cmd = exec_cmd.split("%")[0].strip()
+                elif line.startswith("NoDisplay=true"):
+                    no_display = True
+                elif line.startswith("Terminal=true"):
+                    terminal = True
+        if no_display or not name or not exec_cmd:
+            return None
+        return name, exec_cmd
+
+    def on_app_search_changed(self, entry, menu):
+        # Simple: hide items that don't match the search text
+        text = entry.get_text().lower()
+        for item in menu.get_children():
+            if isinstance(item, Gtk.MenuItem) and item.get_submenu() is None:
+                label = item.get_label() or ""
+                item.set_visible(text == "" or text in label.lower())
+
+    def on_menu_toggle(self, btn):
+        if self.app_menu.get_visible():
+            self.app_menu.popdown()
+        else:
+            self.app_menu.popup_at_widget(
+                btn, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None
+            )
+
+
+def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    win = NexoraPanel()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

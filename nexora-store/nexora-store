@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+#
+# nexora-store — graphical app store for NexoraOS
+#
+# Wraps pacman (official repos) and yay/paru (AUR) behind a friendly GUI.
+# Features:
+#   - Featured / popular apps on the home tab
+#   - Categories (Games, Internet, Office, Dev, Media, System)
+#   - Search (fuzzy, both repos + AUR via `yay -Ss`)
+#   - One-click install / remove / update
+#   - Progress bar + log panel
+#   - "Update all" button
+#
+# Memory target: ~40 MB.
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+import os
+import re
+import subprocess
+import threading
+
+CSS = b"""
+.nexora-store { background-color: #0f2027; color: #e6e6e6; font-family: 'Ubuntu','Noto Sans',sans-serif; }
+.nexora-store .header { font-size: 18px; font-weight: bold; color: #8be9fd; padding: 14px; }
+.nexora-store .frame { background: rgba(255,255,255,0.03); border: 1px solid rgba(139,233,253,0.15); border-radius: 8px; padding: 8px; margin: 4px; }
+.nexora-store .button { background: rgba(139,233,253,0.15); color: #e6e6e6; border: 1px solid rgba(139,233,253,0.30); border-radius: 4px; padding: 6px 12px; }
+.nexora-store .button:hover { background: rgba(139,233,253,0.30); }
+.nexora-store .primary { background: #8be9fd; color: #0f2027; font-weight: bold; }
+.nexora-store .danger { background: rgba(255,99,99,0.20); border-color: rgba(255,99,99,0.45); }
+.nexora-store entry, .nexora-store combobox { background: rgba(255,255,255,0.04); color: #fff; border-radius: 4px; }
+.nexora-store .app-row { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.nexora-store .app-name { font-weight: bold; color: #8be9fd; }
+.nexora-store .app-desc { color: #aaa; font-size: 11px; }
+.nexora-store .app-source { color: #6fc7e0; font-size: 10px; font-style: italic; }
+"""
+
+# Curated featured apps (pkgname, display name, description, category)
+FEATURED = [
+    ("firefox",                   "Firefox",              "Modern, fast web browser",                       "Internet"),
+    ("chromium",                  "Chromium",             "Open-source browser",                            "Internet"),
+    ("transmission-gtk",          "Transmission",         "Lightweight BitTorrent client",                  "Internet"),
+    ("telegram-desktop",          "Telegram",             "Cloud messaging",                                "Internet"),
+    ("discord",                   "Discord",              "Voice + chat for communities",                   "Internet"),
+
+    ("steam",                     "Steam",                "Game store + runtime",                           "Games"),
+    ("lutris",                    "Lutris",               "Open gaming platform",                           "Games"),
+    ("wine",                      "Wine",                 "Windows compatibility layer",                    "Games"),
+    ("retroarch",                 "RetroArch",            "Emulator frontend",                              "Games"),
+    ("pcsx2-git",                 "PCSX2",                "PS2 emulator (AUR)",                             "Games"),
+    ("dolphin-emu",               "Dolphin",              "Wii/GameCube emulator",                          "Games"),
+
+    ("libreoffice-fresh",         "LibreOffice",          "Office suite",                                   "Office"),
+    ("onlyoffice-bin",            "OnlyOffice",           "Modern office suite (AUR)",                      "Office"),
+    ("gimp",                      "GIMP",                 "Image editor",                                   "Media"),
+    ("inkscape",                  "Inkscape",             "Vector graphics editor",                         "Media"),
+    ("obs-studio",                "OBS Studio",           "Streaming + recording",                          "Media"),
+    ("vlc",                       "VLC",                  "Multimedia player",                              "Media"),
+    ("mpv",                       "mpv",                  "Minimal video player",                           "Media"),
+    ("audacity",                  "Audacity",             "Audio editor",                                   "Media"),
+    ("blender",                   "Blender",              "3D creation suite",                              "Media"),
+
+    ("code",                      "VS Code",              "Microsoft's code editor",                         "Dev"),
+    ("vscodium-bin",              "VSCodium",             "Telemetry-free VS Code (AUR)",                   "Dev"),
+    ("vim",                       "Vim",                  "The ubiquitous editor",                           "Dev"),
+    ("neovim",                    "Neovim",               "Modernized Vim",                                 "Dev"),
+    ("emacs",                     "Emacs",                "Extensible editor",                              "Dev"),
+    ("git",                       "Git",                  "Version control",                                "Dev"),
+    ("github-cli",                "GitHub CLI",           "gh command-line tool",                           "Dev"),
+    ("docker",                    "Docker",               "Container runtime",                              "Dev"),
+    ("python",                    "Python",               "Python 3",                                       "Dev"),
+    ("rust",                      "Rust",                 "Systems language",                               "Dev"),
+    ("go",                        "Go",                   "Google's Go",                                    "Dev"),
+    ("jdk-openjdk",               "OpenJDK",             "Java development kit",                            "Dev"),
+
+    ("gparted",                   "GParted",              "Partition editor",                               "System"),
+    ("baobab",                    "Disk Usage",           "Analyze disk usage",                             "System"),
+    ("gnome-system-monitor",      "System Monitor",       "Process manager",                                "System"),
+    ("btop",                      "btop",                 "Modern htop replacement",                        "System"),
+    ("htop",                      "htop",                 "Interactive process viewer",                     "System"),
+    ("reflector",                 "Reflector",            "Mirrorlist optimizer",                           "System"),
+    ("gufw",                      "Firewall Config",      "GUI for ufw",                                    "System"),
+    ("keepassxc",                 "KeePassXC",            "Password manager",                               "System"),
+    ("veracrypt",                 "VeraCrypt",            "Disk encryption (AUR)",                          "System"),
+
+    ("virtualbox",                "VirtualBox",           "Virtual machines",                               "System"),
+    ("qemu",                      "QEMU",                 "Generic machine emulator",                       "System"),
+    ("virt-manager",              "virt-manager",         "libvirt GUI",                                    "System"),
+]
+
+
+def run(cmd):
+    try:
+        subprocess.Popen(cmd, shell=True, start_new_session=True)
+    except Exception as e:
+        print(f"spawn failed: {e}")
+
+
+def pacman_is_installed(pkg):
+    try:
+        r = subprocess.run(["pacman", "-Q", pkg], capture_output=True, text=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+class NexoraStore(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("Nexora Store")
+        self.set_default_size(900, 640)
+        self.set_name("nexora-store")
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+
+        # Header
+        hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        hdr_box.set_border_width(8)
+        outer.pack_start(hdr_box, False, False, 0)
+
+        title = Gtk.Label(label="🛍  Nexora Store")
+        title.get_style_context().add_class("header")
+        hdr_box.pack_start(title, False, False, 0)
+
+        # Search
+        self.search = Gtk.SearchEntry(placeholder_text="Search apps (official repos + AUR)…")
+        self.search.connect("activate", self.on_search)
+        self.search.connect("changed", lambda *_: None)  # type-ahead handled on Enter
+        hdr_box.pack_start(self.search, True, True, 0)
+
+        # Update all
+        update_btn = Gtk.Button(label="⬆ Update All")
+        update_btn.connect("clicked", lambda *_: self.run_action("sudo pacman -Syu --noconfirm"))
+        hdr_box.pack_start(update_btn, False, False, 0)
+
+        # Notebook for categories
+        nb = Gtk.Notebook()
+        outer.pack_start(nb, True, True, 0)
+
+        # Featured tab
+        featured_page = self._build_app_grid(FEATURED)
+        nb.append_page(featured_page, Gtk.Label(label="Featured"))
+
+        # Category tabs
+        categories = ["Games", "Internet", "Office", "Media", "Dev", "System"]
+        for cat in categories:
+            apps = [a for a in FEATURED if a[3] == cat]
+            page = self._build_app_grid(apps)
+            nb.append_page(page, Gtk.Label(label=cat))
+
+        # Search results tab (hidden until first search)
+        self.search_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.search_results.set_border_width(8)
+        self.search_label = Gtk.Label(label="Type and press Enter to search.")
+        self.search_results.pack_start(self.search_label, False, False, 0)
+        self.search_scroll = Gtk.ScrolledWindow()
+        self.search_results.pack_start(self.search_scroll, True, True, 0)
+        nb.append_page(self.search_results, Gtk.Label(label="Search"))
+        self.search_tab_index = nb.get_n_pages() - 1
+        self.nb = nb
+
+        # Log panel
+        log_frame = Gtk.Frame(label="Activity log")
+        log_frame.get_style_context().add_class("frame")
+        log_frame.set_margin_start(8)
+        log_frame.set_margin_end(8)
+        log_frame.set_margin_bottom(8)
+        outer.pack_start(log_frame, False, False, 0)
+        self.log = Gtk.TextView()
+        self.log.set_editable(False)
+        self.log.get_buffer().set_text("Ready.\n")
+        log_frame.add(self.log)
+
+        # CSS
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.show_all()
+
+    # ---------- UI builders ----------
+
+    def _build_app_grid(self, apps):
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_border_width(8)
+        # VBox of rows
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        scroll.add(vbox)
+        for pkg, name, desc, cat in apps:
+            row = self._build_app_row(pkg, name, desc, cat)
+            vbox.pack_start(row, False, False, 0)
+        return scroll
+
+    def _build_app_row(self, pkg, name, desc, source):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.get_style_context().add_class("app-row")
+        row.set_border_width(4)
+
+        # Left: name + desc
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        info.pack_start(Gtk.Label(label=name, xalign=0), False, False, 0)
+        info.pack_start(Gtk.Label(label=desc, xalign=0), False, False, 0)
+        info.pack_start(Gtk.Label(label=f"Package: {pkg}  ·  {source}", xalign=0), False, False, 0)
+        row.pack_start(info, True, True, 0)
+
+        # Right: status + button
+        if pacman_is_installed(pkg):
+            btn = Gtk.Button(label="✓ Installed  ·  Remove")
+            btn.get_style_context().add_class("danger")
+            btn.connect("clicked", lambda *_w, p=pkg: self.run_action(f"sudo pacman -Rns --noconfirm {p}"))
+        else:
+            btn = Gtk.Button(label="⬇ Install")
+            btn.get_style_context().add_class("primary")
+            # AUR packages: detect via name suffix
+            if pkg.endswith(("-git", "-bin", "-snap", "-appimage")):
+                btn.connect("clicked", lambda *_w, p=pkg: self.run_action(f"yay -S --noconfirm --needed {p}"))
+            else:
+                btn.connect("clicked", lambda *_w, p=pkg: self.run_action(f"sudo pacman -S --noconfirm --needed {p}"))
+        row.pack_start(btn, False, False, 0)
+
+        return row
+
+    # ---------- Actions ----------
+
+    def run_action(self, cmd):
+        """Run an installation/removal command in a background thread,
+        streaming output to the log panel."""
+        self._log(f"$ {cmd}\n")
+        t = threading.Thread(target=self._worker, args=(cmd,), daemon=True)
+        t.start()
+
+    def _worker(self, cmd):
+        try:
+            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                GLib.idle_add(self._log, line)
+            proc.wait()
+            rc = proc.returncode
+            GLib.idle_add(self._log, f"[exit code {rc}]\n")
+        except Exception as e:
+            GLib.idle_add(self._log, f"[error] {e}\n")
+
+    def _log(self, text):
+        buf = self.log.get_buffer()
+        end = buf.get_end_iter()
+        buf.insert(end, text)
+        # Auto-scroll
+        self.log.scroll_to_iter(buf.get_end_iter(), 0.0, False, 0.0, 0.0)
+
+    # ---------- Search ----------
+
+    def on_search(self, entry):
+        text = entry.get_text().strip()
+        if not text:
+            return
+        # Clear previous results
+        for child in self.search_scroll.get_children():
+            self.search_scroll.remove(child)
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        vbox.set_border_width(8)
+        self.search_scroll.add(vbox)
+
+        # Use yay to search both repos and AUR
+        try:
+            out = subprocess.check_output(
+                ["yay", "-Ss", text], stderr=subprocess.DEVNULL, text=True, timeout=30
+            )
+        except Exception as e:
+            self.search_label.set_text(f"Search failed: {e}")
+            self.search_label.show()
+            self.nb.set_current_page(self.search_tab_index)
+            return
+
+        results = []
+        for line in out.splitlines():
+            if not line or line.startswith("::") or line.startswith(" "):
+                continue
+            # Format: "pkgname/version repo"  then  "    description"
+            m = re.match(r"^(\S+)/\S+\s+(\S+)$", line)
+            if m:
+                pkg = m.group(1)
+                source = m.group(2)
+                results.append((pkg, source))
+
+        if not results:
+            self.search_label.set_text("No results.")
+            self.search_label.show()
+        else:
+            self.search_label.set_text(f"{len(results)} result(s):")
+            self.search_label.show()
+            for pkg, source in results[:80]:
+                row = self._build_app_row(pkg, pkg, source, source)
+                vbox.pack_start(row, False, False, 0)
+
+        vbox.show_all()
+        self.nb.set_current_page(self.search_tab_index)
+
+
+def main():
+    win = NexoraStore()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

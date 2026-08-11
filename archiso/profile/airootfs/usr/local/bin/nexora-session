@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# nexora-session — starts the NexoraDE desktop session
+# This is the Exec= target of /usr/share/xsessions/nexora.desktop.
+#
+# Resource budget: <300 MB RAM at idle. We achieve this by:
+#   - Using Openbox as the WM (10-15 MB)
+#   - Running ONE Python GTK3 panel instead of GNOME-Shell / Plasma
+#   - No compositing by default (picom can be enabled per-user)
+#   - No indexing, no search, no location, no telemetry daemons
+
+set -e
+
+export XDG_CURRENT_DESKTOP=Nexora
+export XDG_SESSION_DESKTOP=nexora
+export XDG_SESSION_TYPE=x11
+export DESKTOP_SESSION=nexora
+export GTK_THEME=Nexora-2026:dark
+export QT_QPA_PLATFORMTHEME=qt5ct
+export SAL_USE_VCLPLUGIN=gtk3
+export MOZ_ENABLE_WAYLAND=0
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# Load user xprofile if present
+if [ -f "$HOME/.xprofile" ]; then
+    . "$HOME/.xprofile"
+fi
+
+# Apply X resources
+if [ -f "$HOME/.Xresources" ]; then
+    xrdb -merge "$HOME/.Xresources"
+fi
+
+# Set default cursor
+xsetroot -cursor_name left_ptr 2>/dev/null || true
+
+# Start essential helpers (only if not already running)
+if ! pgrep -x dbus-daemon >/dev/null; then
+    eval "$(dbus-launch --sh-syntax --exit-with-session)"
+fi
+
+# Polkit (GUI auth dialog)
+if [ -x /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 ]; then
+    /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 &
+fi
+
+# Network Manager applet
+if command -v nm-applet >/dev/null; then
+    nm-applet --no-agent &
+fi
+
+# Volume icon
+if command -v volumeicon >/dev/null; then
+    volumeicon &
+fi
+
+# Compositor (light, optional)
+if command -v picom >/dev/null; then
+    picom -b --config /dev/null 2>/dev/null || true
+fi
+
+# Welcome screen on first login
+if [ -x /usr/local/bin/nexora-welcome ] && [ ! -f "$HOME/.config/nexora/.welcomed" ]; then
+    (sleep 2 && /usr/local/bin/nexora-welcome) &
+fi
+
+# The panel — this is the centerpiece of NexoraDE
+if [ -x /usr/local/bin/nexora-panel ]; then
+    /usr/local/bin/nexora-panel &
+fi
+
+# Openbox itself (blocks until logout)
+exec openbox --config-file "$HOME/.config/openbox/rc.xml" \
+             --menu-file  "$HOME/.config/openbox/menu.xml"

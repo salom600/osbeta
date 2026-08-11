@@ -1,0 +1,16 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+NexoraOS is licensed under the GNU GPL v3 (or any later version) for the
+distribution as a whole (installer, profiles, system configs, build scripts).
+
+The NexoraDE desktop tools (Python scripts in nexora-de/bin/, nexora-store/,
+nexora-installer/) are additionally available under the MIT license — see
+LICENSE.MIT. You may use those tools under either license, at your option.
+
+For the full text of GPL-3.0, see:
+https://www.gnu.org/licenses/gpl-3.0.txt

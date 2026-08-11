@@ -1,0 +1,337 @@
+name: Auto-fix Build Failures
+
+on:
+  issues:
+    types: [opened, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+  pull-requests: write
+
+jobs:
+  auto-fix:
+    # Only run on issues labeled build-failure / auto-fix
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'auto-fix'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.email "nexora-bot@users.noreply.github.com"
+          git config --global user.name "nexora-bot"
+
+      - name: Resolve issue number
+        id: issue
+        run: |
+          if [ -n "${{ inputs.issue_number }}" ]; then
+            echo "num=${{ inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "num=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch failed run logs
+        id: fetch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ISSUE_NUM="${{ steps.issue.outputs.num }}"
+          mkdir -p .auto-fix
+          # Find the latest failed "Build NexoraOS ISO" run
+          RUN_ID=$(gh run list \
+            --workflow="Build NexoraOS ISO" \
+            --status=failure \
+            --limit=5 \
+            --json databaseId,conclusion \
+            --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "No failed run found." > .auto-fix/build.log
+            echo "run_id=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+            gh run view "$RUN_ID" --log-failed > .auto-fix/build.log 2>&1 || \
+              gh run view "$RUN_ID" --log > .auto-fix/build.log 2>&1
+          fi
+          # Truncate to 2MB to fit in API calls
+          head -c 2000000 .auto-fix/build.log > .auto-fix/build.log.trimmed || true
+          mv .auto-fix/build.log.trimmed .auto-fix/build.log 2>/dev/null || true
+          wc -l .auto-fix/build.log
+
+      - name: Analyze log + propose patch
+        id: analyze
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 <<'PYEOF' > .auto-fix/analysis.json
+          import json, re, os, sys
+          from pathlib import Path
+
+          log = Path(".auto-fix/build.log").read_text(errors="ignore") if Path(".auto-fix/build.log").exists() else ""
+
+          # Common failure patterns and their fixes
+          patterns = [
+              {
+                  "name": "package_not_found",
+                  "regex": r"error: target not found: (\S+)|error: could not find (\S+)",
+                  "fix": "remove_package",
+                  "description": "Package not found in repos — remove from package list."
+              },
+              {
+                  "name": "broken_signature",
+                  "regex": r"invalid or corrupted database \(PGP signature\)|signature from .* is unknown trust",
+                  "fix": "refresh_keyring",
+                  "description": "PGP signature failure — refresh archlinux-keyring."
+              },
+              {
+                  "name": "missing_dependency",
+                  "regex": r"missing dependency: (\S+)",
+                  "fix": "add_package",
+                  "description": "Missing dependency — add to package list."
+              },
+              {
+                  "name": "disk_space",
+                  "regex": r"No space left on device|partition \S+ too full",
+                  "fix": "free_disk",
+                  "description": "Out of disk — trim package list."
+              },
+              {
+                  "name": "profile_syntax",
+                  "regex": r"profiledef\.sh: line (\d+):.*|syntax error near unexpected token",
+                  "fix": "profile_syntax",
+                  "description": "Bash syntax error in profiledef."
+              },
+              {
+                  "name": "docker_fail",
+                  "regex": r"docker: Error response|Cannot connect to the Docker daemon",
+                  "fix": "docker_retry",
+                  "description": "Docker transient failure — retry."
+              },
+              {
+                  "name": "python_import",
+                  "regex": r"ModuleNotFoundError: No module named '(\S+)'",
+                  "fix": "add_python_dep",
+                  "description": "Python module missing in NexoraDE scripts."
+              },
+          ]
+
+          matches = []
+          for p in patterns:
+              for m in re.finditer(p["regex"], log, re.MULTILINE):
+                  matches.append({
+                      "pattern": p["name"],
+                      "fix": p["fix"],
+                      "description": p["description"],
+                      "match_text": m.group(0)[:300],
+                      "captured_groups": [g for g in m.groups() if g],
+                  })
+
+          # Determine which file(s) to patch
+          patchable_files = []
+          if any(m["fix"] in ("remove_package","add_package") for m in matches):
+              patchable_files.append("archiso/profile/packages.x86_64")
+              patchable_files.append("archiso/profile/airootfs/etc/calamares/modules/packages.conf")
+          if any(m["fix"] == "refresh_keyring" for m in matches):
+              patchable_files.append(".github/workflows/build-iso.yml")
+          if any(m["fix"] == "profile_syntax" for m in matches):
+              patchable_files.append("archiso/profile/profiledef.sh")
+
+          result = {
+              "matches": matches,
+              "patchable_files": patchable_files,
+              "log_lines": len(log.splitlines()),
+              "verdict": "fixable" if matches else "unknown",
+          }
+          print(json.dumps(result, indent=2))
+          PYEOF
+          cat .auto-fix/analysis.json
+          VERDICT=$(jq -r '.verdict' .auto-fix/analysis.json)
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Apply automated patches
+        if: steps.analyze.outputs.verdict == 'fixable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 <<'PYEOF'
+          import json, re
+          from pathlib import Path
+
+          analysis = json.loads(Path(".auto-fix/analysis.json").read_text())
+          matches = analysis["matches"]
+          commits = []
+
+          # Group by fix type
+          by_fix = {}
+          for m in matches:
+              by_fix.setdefault(m["fix"], []).append(m)
+
+          # --- remove_package ---
+          if "remove_package" in by_fix:
+              pkgs_to_remove = set()
+              for m in by_fix["remove_package"]:
+                  for g in m.get("captured_groups", []):
+                      if g:
+                          pkgs_to_remove.add(g.strip())
+              # Remove from packages.x86_64
+              pkgfile = Path("archiso/profile/packages.x86_64")
+              if pkgfile.exists():
+                  original = pkgfile.read_text()
+                  new = original
+                  for pkg in pkgs_to_remove:
+                      # Remove line(s) that contain exactly this package name
+                      new = re.sub(rf"^{re.escape(pkg)}$", f"# REMOVED (auto-fix): {pkg}", new, flags=re.MULTILINE)
+                  if new != original:
+                      pkgfile.write_text(new)
+                      commits.append(f"auto-fix: remove unavailable package(s): {', '.join(sorted(pkgs_to_remove))}")
+
+              # Also remove from calamares packages.conf
+              calfile = Path("archiso/profile/airootfs/etc/calamares/modules/packages.conf")
+              if calfile.exists():
+                  original = calfile.read_text()
+                  new = original
+                  for pkg in pkgs_to_remove:
+                      new = re.sub(rf"^\s*-\s*{re.escape(pkg)}$", f"      # REMOVED (auto-fix): {pkg}", new, flags=re.MULTILINE)
+                  if new != original:
+                      calfile.write_text(new)
+
+          # --- add_package (missing deps) ---
+          if "add_package" in by_fix:
+              pkgs_to_add = set()
+              for m in by_fix["add_package"]:
+                  for g in m.get("captured_groups", []):
+                      if g:
+                          pkgs_to_add.add(g.strip())
+              if pkgs_to_add:
+                  pkgfile = Path("archiso/profile/packages.x86_64")
+                  if pkgfile.exists():
+                      original = pkgfile.read_text()
+                      addition = "\n# auto-fix: added missing dependencies\n" + "\n".join(sorted(pkgs_to_add)) + "\n"
+                      pkgfile.write_text(original + addition)
+                      commits.append(f"auto-fix: add missing dependencies: {', '.join(sorted(pkgs_to_add))}")
+
+          # --- refresh_keyring ---
+          if "refresh_keyring" in by_fix:
+              wf = Path(".github/workflows/build-iso.yml")
+              if wf.exists():
+                  txt = wf.read_text()
+                  if "pacman-key --refresh-keys" not in txt:
+                      txt = txt.replace(
+                          "pacman-key --populate archlinux",
+                          "pacman-key --populate archlinux\n              pacman-key --refresh-keys || true"
+                      )
+                      wf.write_text(txt)
+                      commits.append("auto-fix: refresh PGP keyring before build")
+
+          # --- add_python_dep ---
+          if "add_python_dep" in by_fix:
+              mods_to_add = set()
+              for m in by_fix["add_python_dep"]:
+                  for g in m.get("captured_groups", []):
+                      if g:
+                          mods_to_add.add(g.strip())
+              pkgfile = Path("archiso/profile/packages.x86_64")
+              if pkgfile.exists():
+                  original = pkgfile.read_text()
+                  addition = "\n# auto-fix: missing python modules\n" + "\n".join(f"python-{m}" for m in sorted(mods_to_add)) + "\n"
+                  pkgfile.write_text(original + addition)
+                  commits.append(f"auto-fix: add missing python modules: {', '.join(sorted(mods_to_add))}")
+
+          Path(".auto-fix/commits.txt").write_text("\n".join(commits))
+          print("Patches applied:")
+          for c in commits:
+              print(" -", c)
+          PYEOF
+
+          if [ -s .auto-fix/commits.txt ]; then
+            BRANCH="auto-fix/issue-${{ steps.issue.outputs.num }}"
+            git checkout -b "$BRANCH"
+            git add -A
+            git commit -F .auto-fix/commits.txt
+            git push origin "$BRANCH"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=" >> "$GITHUB_OUTPUT"
+          fi
+        id: patch
+
+      - name: Create pull request
+        if: steps.patch.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.patch.outputs.branch }}"
+          TITLE="🤖 Auto-fix for #${{ steps.issue.outputs.num }}"
+          BODY=$(cat <<EOF
+          ## Automated fix for #${{ steps.issue.outputs.num }}
+
+          This PR was generated by the \`auto-fix\` workflow after analyzing the build log of the failed run.
+
+          ### Applied patches
+          $(cat .auto-fix/commits.txt | sed 's/^/- /')
+
+          ### Pattern matches
+          \`\`\`json
+          $(jq -c '.' .auto-fix/analysis.json)
+          \`\`\`
+
+          Once this PR is merged, the \`Build NexoraOS ISO\` workflow will re-run automatically.
+          EOF
+          )
+          PR_URL=$(gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY" || true)
+          if [ -n "$PR_URL" ]; then
+            echo "PR created: $PR_URL"
+            # Auto-merge if the PR is from the same owner
+            gh pr merge "$BRANCH" --squash --delete-branch --admin || true
+          fi
+
+      - name: Comment on issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ISSUE_NUM="${{ steps.issue.outputs.num }}"
+          VERDICT="${{ steps.analyze.outputs.verdict }}"
+          BRANCH="${{ steps.patch.outputs.branch }}"
+
+          if [ "$VERDICT" = "fixable" ] && [ -n "$BRANCH" ]; then
+            COMMENT="🤖 **Auto-fix applied.**
+
+          The auto-fix workflow analyzed the build log and applied patches:
+          $(cat .auto-fix/commits.txt 2>/dev/null | sed 's/^/- /')
+
+          A PR has been opened and auto-merged. The build will re-run automatically.
+
+          If the build fails again, a new issue will be created with updated diagnostics."
+          else
+            COMMENT="🤖 **Auto-fix could not determine a fix.**
+
+          The build log did not match any of the known failure patterns.
+
+          ### Log excerpt (last 50 lines)
+          \`\`\`
+          $(tail -50 .auto-fix/build.log 2>/dev/null)
+          \`\`\`
+
+          Please inspect the [failed run](${{ github.server_url }}/${{ github.repository }}/actions) manually and push a fix."
+          fi
+
+          gh issue comment "$ISSUE_NUM" --body "$COMMENT"

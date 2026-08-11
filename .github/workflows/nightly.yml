@@ -1,0 +1,33 @@
+name: Nightly rebuild
+
+on:
+  schedule:
+    # 03:00 UTC daily
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  trigger:
+    name: Trigger build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trigger Build NexoraOS ISO workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run "Build NexoraOS ISO" \
+            --ref "${{ github.ref_name }}" \
+            -f version_tag="nightly-$(date +%Y%m%d)" \
+            -f make_release=false
+
+      - name: Wait 30s and capture run URL
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 30
+          gh run list --workflow="Build NexoraOS ISO" --limit=1 --json databaseId,url --jq '.[0] | "Run URL: \(.url)"'

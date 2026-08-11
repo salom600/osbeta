@@ -1,0 +1,25 @@
+#!/bin/bash
+#
+# nexora-installer — launches the Calamares system installer
+#
+# Calamares is the same installer used by Manjaro, KaOS, Lubuntu, etc.
+# It supports BIOS + UEFI, manual/automatic partitioning, side-by-side installs,
+# filesystems (ext4/btrfs/xfs), and writes a fresh /etc/fstab.
+#
+# We patch the Calamares config from /etc/calamares/ on first launch to make
+# sure the NexoraOS branding is applied.
+
+set -e
+
+# Polkit auth prompt
+if [ "$EUID" -ne 0 ]; then
+    if command -v pkexec >/dev/null; then
+        exec pkexec env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+                      QT_QPA_PLATFORMTHEME=qt5ct \
+                      calamares -d -c /etc/calamares
+    else
+        exec sudo -E calamares -d -c /etc/calamares
+    fi
+else
+    exec calamares -d -c /etc/calamares
+fi

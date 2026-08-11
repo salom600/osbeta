@@ -1,0 +1,28 @@
+# Build artifacts
+work/
+out/
+*.iso
+*.iso.sha256sum
+*.sfs
+*.img
+*.sig
+
+# Auto-fix working files
+.auto-fix/
+failure-logs/
+
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+*.code-workspace
+
+# Secrets — NEVER commit
+.env
+*.token
+*.key
+secrets/
+github_token*

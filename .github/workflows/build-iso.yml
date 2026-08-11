@@ -1,0 +1,231 @@
+name: Build NexoraOS ISO
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag for the release (e.g. 2026.1-beta1)'
+        required: false
+        default: ''
+      make_release:
+        description: 'Create GitHub release with the ISO attached'
+        type: boolean
+        required: false
+        default: false
+
+env:
+  ISO_NAME: nexora
+  ARTIFACT_RETENTION_DAYS: 30
+
+jobs:
+  build:
+    name: Build x86_64 ISO (BIOS + UEFI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: write
+      issues: write
+      packages: write
+
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      iso_path: ${{ steps.build.outputs.iso_path }}
+
+    steps:
+      # ---- 1. Checkout ----
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---- 2. Free up disk space ----
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo apt-get -y purge \
+            azure-cli ghc* google* dotnet* powershell firefox \
+            temurin-* mono-devel ruby-full || true
+          sudo apt-get -y autoremove --purge
+          sudo apt-get -y clean
+          df -h /
+
+      # ---- 3. Detect version ----
+      - name: Compute version string
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version_tag }}" ]; then
+            V="${{ inputs.version_tag }}"
+          else
+            V="$(date +%Y.%m.%d)-${GITHUB_SHA::7}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "iso_label=NEXORA_$(date +%Y%m)" >> "$GITHUB_OUTPUT"
+          echo "Building version: $V"
+
+      # ---- 4. Build ISO in Docker container (official archlinux image) ----
+      - name: Build NexoraOS ISO
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p work out
+
+          # Run archiso inside the official archlinux:latest image
+          # We mount the repo so the container can read archiso/profile/
+          # and write the built ISO to ./out/
+          docker run --rm \
+            -v "$PWD":/work \
+            -w /work \
+            --privileged \
+            -e ISO_VERSION="${{ steps.ver.outputs.version }}" \
+            -e ISO_LABEL="${{ steps.ver.outputs.iso_label }}" \
+            archlinux:latest \
+            bash -euo pipefail -c '
+              echo "==> Updating container..."
+              sed -i "s/^#ParallelDownloads.*/ParallelDownloads = 8/" /etc/pacman.conf
+              pacman -Sy --noconfirm --needed archiso archlinux-keyring sudo grub syslinux mtools dosfstools squashfs-tools
+
+              echo "==> Initializing keyring..."
+              pacman-key --init
+              pacman-key --populate archlinux
+
+              echo "==> Patching profiledef version..."
+              sed -i "s/^iso_version=.*/iso_version=\"${ISO_VERSION}\"/" /work/archiso/profile/profiledef.sh
+              sed -i "s/^iso_label=.*/iso_label=\"${ISO_LABEL}\"/" /work/archiso/profile/profiledef.sh
+
+              echo "==> Running mkarchiso..."
+              cd /work
+              mkarchiso -v -w ./work -o ./out ./archiso/profile 2>&1 | tee ./work/build.log
+
+              echo "==> Built ISO:"
+              ls -lh ./out/
+            '
+
+          # Verify ISO exists
+          ISO_FILE=$(ls out/*.iso 2>/dev/null | head -1 || true)
+          if [ -z "$ISO_FILE" ]; then
+            echo "ERROR: No ISO produced. Build log:"
+            cat work/build.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "iso_path=$ISO_FILE" >> "$GITHUB_OUTPUT"
+          echo "iso_name=$(basename $ISO_FILE)" >> "$GITHUB_OUTPUT"
+          sha256sum "$ISO_FILE" > "$ISO_FILE.sha256sum"
+          echo "iso_sha_path=$ISO_FILE.sha256sum" >> "$GITHUB_OUTPUT"
+
+          # Capture build log
+          cp work/build.log out/build.log || true
+
+      # ---- 5. Upload artifact ----
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexora-iso-${{ steps.ver.outputs.version }}
+          path: |
+            out/*.iso
+            out/*.iso.sha256sum
+            out/build.log
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
+
+      # ---- 6. Create release (only on push to main or explicit dispatch) ----
+      - name: Create GitHub release
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.make_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "NexoraOS ${{ steps.ver.outputs.version }}"
+          body: |
+            # NexoraOS ${{ steps.ver.outputs.version }}
+
+            Automated build from commit `${{ github.sha }}`.
+
+            ## Download
+            - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso` — bootable hybrid ISO (BIOS + UEFI)
+            - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso.sha256sum` — checksum
+
+            ## How to use
+            1. Flash the ISO to a USB stick:
+               ```bash
+               sudo dd if=nexora-${{ steps.ver.outputs.version }}-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+               ```
+               Or use [balenaEtcher](https://etcher.balena.io/) / [Ventoy](https://www.ventoy.net).
+            2. Boot from the USB stick (BIOS or UEFI).
+            3. Click **Install NexoraOS** on the desktop to start Calamares.
+
+            ## Minimum specs
+            - 1 GB RAM (low-RAM boot) / 2 GB recommended
+            - 10 GB free disk space
+            - x86_64 CPU (Intel/AMD from 2009+)
+            - BIOS or UEFI
+
+            ## Build log
+            Attached: `build.log`
+          files: |
+            ${{ steps.build.outputs.iso_path }}
+            ${{ steps.build.outputs.iso_sha_path }}
+            out/build.log
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- 7. On failure: open an issue so the auto-fix workflow can pick it up ----
+  report-failure:
+    name: Open issue on failure
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          ## 🚧 Build failure
+
+          The **Build NexoraOS ISO** workflow failed.
+
+          | Field | Value |
+          |-------|-------|
+          | Version | \`${VERSION:-unknown}\` |
+          | Commit | \`${COMMIT_SHA}\` |
+          | Message | \`\`\`${COMMIT_MSG}\`\`\` |
+          | Run URL | [${RUN_ID}](${RUN_URL}) |
+
+          ## What happens next
+
+          The \`auto-fix\` workflow will pick up this issue automatically, parse the build log, and attempt a patch. If it can't fix the issue automatically it will post a comment with the root-cause analysis and a suggested fix.
+
+          If you want to retry the build now, click here:
+          [Re-run failed jobs](${RUN_URL})
+          EOF
+          )
+          gh issue create \
+            --title "🚧 Build failure on \`${COMMIT_SHA::7}\`" \
+            --body "$BODY" \
+            --label "build-failure,auto-fix,automated" \
+            --assignee salom600

@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+#
+# nexora-settings — control center for NexoraDE
+#
+# Tabs:
+#   - Appearance (theme, icons, fonts)
+#   - Display (resolution, mirroring)
+#   - Network (open nm-connection-editor)
+#   - Sound (open pavucontrol)
+#   - Power (auto-suspend timeout, brightness)
+#   - Users (create / change password)
+#   - System info (kernel, CPU, RAM, disk)
+#
+# Memory target: <40 MB.
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+import os
+import shutil
+import subprocess
+import platform
+import psutil
+
+CSS = b"""
+.nexora-settings { background-color: #0f2027; color: #e6e6e6; font-family: "Ubuntu","Noto Sans",sans-serif; }
+.nexora-settings .header { font-size: 18px; font-weight: bold; color: #8be9fd; padding: 14px; }
+.nexora-settings .frame { background: rgba(255,255,255,0.03); border: 1px solid rgba(139,233,253,0.15); border-radius: 8px; padding: 10px; margin: 8px; }
+.nexora-settings .label { color: #e6e6e6; padding: 4px; }
+.nexora-settings .button { background: rgba(139,233,253,0.15); color: #e6e6e6; border: 1px solid rgba(139,233,253,0.30); border-radius: 4px; padding: 6px 12px; }
+.nexora-settings .button:hover { background: rgba(139,233,253,0.30); }
+.nexora-settings .notebook > header > tabs { background: #0a1820; }
+.nexora-settings .notebook tab { padding: 8px 14px; color: #aaa; }
+.nexora-settings .notebook tab:checked { color: #8be9fd; font-weight: bold; }
+"""
+
+
+def run(cmd):
+    try:
+        subprocess.Popen(cmd, shell=True, start_new_session=True)
+    except Exception as e:
+        print(f"spawn failed: {e}")
+
+
+class SettingsWindow(Gtk.Window):
+    def __init__(self, initial_tab="appearance"):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("Nexora Settings")
+        self.set_default_size(720, 540)
+        self.set_name("nexora-settings")
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+
+        header = Gtk.Label(label="Nexora Settings")
+        header.get_style_context().add_class("header")
+        outer.pack_start(header, False, False, 0)
+
+        nb = Gtk.Notebook()
+        nb.get_style_context().add_class("notebook")
+        outer.pack_start(nb, True, True, 0)
+
+        tabs = {
+            "appearance": ("Appearance", self._tab_appearance),
+            "display": ("Display", self._tab_display),
+            "network": ("Network", self._tab_network),
+            "sound": ("Sound", self._tab_sound),
+            "power": ("Power", self._tab_power),
+            "users": ("Users", self._tab_users),
+            "system": ("System", self._tab_system),
+            "about": ("About", self._tab_about),
+        }
+        for key, (label, builder) in tabs.items():
+            page = builder()
+            l = Gtk.Label(label=label)
+            nb.append_page(page, l)
+            if key == initial_tab:
+                nb.set_current_page(nb.get_n_pages() - 1)
+
+        # CSS
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.show_all()
+
+    # ---------- Tabs ----------
+
+    def _frame(self, label, child):
+        f = Gtk.Frame(label=label)
+        f.get_style_context().add_class("frame")
+        f.add(child)
+        return f
+
+    def _tab_appearance(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+
+        # GTK theme
+        theme_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        theme_row.pack_start(Gtk.Label(label="GTK theme:"), False, False, 0)
+        cb = Gtk.ComboBoxText()
+        for t in ["Nexora-2026", "Arc-Dark", "Adwaita-dark", "Breeze-Dark"]:
+            cb.append_text(t)
+        cb.set_active(0)
+        cb.connect("changed", lambda w: run(f"gsettings set org.gnome.desktop.interface gtk-theme '{w.get_active_text()}'"))
+        theme_row.pack_start(cb, False, False, 0)
+        box.pack_start(self._frame("Theme", theme_row), False, False, 0)
+
+        # Icon theme
+        icon_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        icon_row.pack_start(Gtk.Label(label="Icons:"), False, False, 0)
+        cb2 = Gtk.ComboBoxText()
+        for t in ["Papirus-Dark", "Papirus", "Arc", "Breeze", "Adwaita"]:
+            cb2.append_text(t)
+        cb2.set_active(0)
+        cb2.connect("changed", lambda w: run(f"gsettings set org.gnome.desktop.interface icon-theme '{w.get_active_text()}'"))
+        icon_row.pack_start(cb2, False, False, 0)
+        box.pack_start(self._frame("Icons", icon_row), False, False, 0)
+
+        # Appearance tweaks button
+        adv = Gtk.Button(label="Open LXAppearance (advanced)")
+        adv.connect("clicked", lambda *_: run("lxappearance"))
+        box.pack_start(adv, False, False, 0)
+
+        return box
+
+    def _tab_display(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+        btn = Gtk.Button(label="Open ARandR (display layout)")
+        btn.connect("clicked", lambda *_: run("arandr"))
+        box.pack_start(btn, False, False, 0)
+
+        # Resolution
+        res_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        res_row.pack_start(Gtk.Label(label="Quick resolution:"), False, False, 0)
+        cb = Gtk.ComboBoxText()
+        for r in ["1920x1080", "1680x1050", "1600x900", "1366x768", "1280x1024", "1280x720", "1024x768"]:
+            cb.append_text(r)
+        cb.set_active(0)
+        res_row.pack_start(cb, False, False, 0)
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.connect("clicked", lambda *_: run(f"xrandr -s {cb.get_active_text()}"))
+        res_row.pack_start(apply_btn, False, False, 0)
+        box.pack_start(self._frame("Display", res_row), False, False, 0)
+        return box
+
+    def _tab_network(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+        btn = Gtk.Button(label="Open Network Manager")
+        btn.connect("clicked", lambda *_: run("nm-connection-editor"))
+        box.pack_start(btn, False, False, 0)
+
+        # Wi-Fi toggle
+        wifi_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        wifi_row.pack_start(Gtk.Label(label="Wi-Fi:"), False, False, 0)
+        sw = Gtk.Switch()
+        # Default state
+        try:
+            out = subprocess.check_output(["nmcli", "radio", "wifi"], text=True).strip()
+            sw.set_active(out == "enabled")
+        except Exception:
+            sw.set_active(True)
+        sw.connect("notify::active", lambda *_: run("nmcli radio wifi on" if sw.get_active() else "nmcli radio wifi off"))
+        wifi_row.pack_start(sw, False, False, 0)
+        box.pack_start(self._frame("Wi-Fi", wifi_row), False, False, 0)
+        return box
+
+    def _tab_sound(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+        btn = Gtk.Button(label="Open Volume Control (PulseAudio)")
+        btn.connect("clicked", lambda *_: run("pavucontrol"))
+        box.pack_start(btn, False, False, 0)
+
+        # Master volume slider
+        vol_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        vol_row.pack_start(Gtk.Label(label="Master:"), False, False, 0)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        try:
+            out = subprocess.check_output(["amixer", "get", "Master", "-M"], text=True)
+            import re
+            m = re.search(r"\[(\d+)%\]", out)
+            if m:
+                scale.set_value(int(m.group(1)))
+        except Exception:
+            pass
+        scale.connect("value-changed", lambda w: run(f"amixer -q set Master {int(w.get_value())}%"))
+        vol_row.pack_start(scale, True, True, 0)
+        box.pack_start(self._frame("Volume", vol_row), False, False, 0)
+        return box
+
+    def _tab_power(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+
+        # Auto-suspend
+        suspend_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        suspend_row.pack_start(Gtk.Label(label="Auto-suspend after (minutes):"), False, False, 0)
+        cb = Gtk.ComboBoxText()
+        for m in ["5", "10", "15", "30", "60", "Never"]:
+            cb.append_text(m)
+        cb.set_active(3)
+        cb.connect("changed", lambda w: run(f"gsettings set org.gnome.desktop.session idle-delay {0 if w.get_active_text()=='Never' else int(w.get_active_text())*60}"))
+        suspend_row.pack_start(cb, False, False, 0)
+        box.pack_start(self._frame("Idle", suspend_row), False, False, 0)
+
+        # Brightness
+        bright_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bright_row.pack_start(Gtk.Label(label="Brightness:"), False, False, 0)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5, 100, 5)
+        try:
+            with open("/sys/class/backlight/intel_backlight/brightness") as f:
+                cur = int(f.read())
+            with open("/sys/class/backlight/intel_backlight/max_brightness") as f:
+                mx = int(f.read())
+            scale.set_value(int(cur / mx * 100))
+        except Exception:
+            scale.set_value(80)
+        scale.connect("value-changed", lambda w: run(f"sudo sh -c 'echo $(( {int(w.get_value())} * $(cat /sys/class/backlight/intel_backlight/max_brightness) / 100 )) > /sys/class/backlight/intel_backlight/brightness'"))
+        bright_row.pack_start(scale, True, True, 0)
+        box.pack_start(self._frame("Brightness", bright_row), False, False, 0)
+
+        return box
+
+    def _tab_users(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+
+        # Current user info
+        user = os.environ.get("USER", "nexora")
+        info = Gtk.Label(label=f"Logged in as: <b>{user}</b>")
+        info.set_use_markup(True)
+        box.pack_start(self._frame("Current User", info), False, False, 0)
+
+        # Change password
+        pwd_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        e1 = Gtk.Entry(placeholder_text="New password", visibility=False)
+        e2 = Gtk.Entry(placeholder_text="Confirm", visibility=False)
+        btn = Gtk.Button(label="Change password")
+        def change_pw(_):
+            p1 = e1.get_text()
+            p2 = e2.get_text()
+            if p1 and p1 == p2:
+                run(f"bash -c 'echo \"{user}:{p1}\" | sudo chpasswd'")
+        btn.connect("clicked", change_pw)
+        pwd_row.pack_start(e1, True, True, 0)
+        pwd_row.pack_start(e2, True, True, 0)
+        pwd_row.pack_start(btn, False, False, 0)
+        box.pack_start(self._frame("Change Password", pwd_row), False, False, 0)
+
+        return box
+
+    def _tab_system(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+
+        info_text = f"""
+<b>Distribution:</b> NexoraOS 2026.1 (Vortex)
+<b>Kernel:</b> {platform.release()}
+<b>Architecture:</b> {platform.machine()}
+<b>CPU:</b> {platform.processor() or 'unknown'}
+<b>CPU cores:</b> {psutil.cpu_count(logical=False) or '?'} physical, {psutil.cpu_count() or '?'} logical
+<b>RAM:</b> {psutil.virtual_memory().total // (1024**3)} GB total, {psutil.virtual_memory().available // (1024**3)} GB available
+<b>Disk (root):</b> {psutil.disk_usage('/').total // (1024**3)} GB total, {psutil.disk_usage('/').free // (1024**3)} GB free
+<b>Uptime:</b> {int(psutil.boot_time())} epoch
+"""
+        lbl = Gtk.Label(label=info_text)
+        lbl.set_use_markup(True)
+        lbl.set_xalign(0)
+        box.pack_start(self._frame("System", lbl), False, False, 0)
+
+        btn = Gtk.Button(label="Open btop (process manager)")
+        btn.connect("clicked", lambda *_: run("lxterminal -e btop"))
+        box.pack_start(btn, False, False, 0)
+
+        return box
+
+    def _tab_about(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(20)
+        lbl = Gtk.Label(label="""
+<span size='xx-large' foreground='#8be9fd'><b>◆ NexoraOS</b></span>
+<span size='large'>2026.1 — Vortex</span>
+
+Lightweight Arch-based distribution.
+Built with Openbox + GTK3 + Python.
+Designed to run on as little as 1 GB RAM (low-RAM boot) and
+idle under 300 MB in the full session.
+
+Homepage: https://github.com/salom600/osbeta
+License: GPL-3.0-or-later (with MIT-licensed Nexora tools)
+""")
+        lbl.set_use_markup(True)
+        lbl.set_justify(Gtk.Justification.CENTER)
+        box.pack_start(lbl, True, True, 0)
+        return box
+
+
+def main():
+    import sys
+    initial = "appearance"
+    if "--tab=" in " ".join(sys.argv):
+        for arg in sys.argv:
+            if arg.startswith("--tab="):
+                initial = arg.split("=", 1)[1]
+    win = SettingsWindow(initial_tab=initial)
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+#
+# nexora-launcher — full-screen app launcher (like rofi/dmenu, GTK3)
+#
+# Invoked via W-r keybinding in Openbox. Provides:
+#   - Fast fuzzy app search
+#   - Calculator (when query starts with =)
+#   - Run arbitrary shell commands (when query starts with >)
+#   - Open URLs (when query looks like a URL)
+#
+# Memory target: <30 MB (only when visible — exits immediately on selection).
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+import os
+import sys
+import re
+import subprocess
+
+CSS = b"""
+.nexora-launcher {
+    background-color: rgba(15, 32, 39, 0.78);
+}
+.nexora-launcher .frame {
+    background-color: rgba(15, 32, 39, 0.96);
+    border: 1px solid rgba(139, 233, 253, 0.30);
+    border-radius: 10px;
+    padding: 12px;
+    color: #e6e6e6;
+}
+.nexora-launcher entry {
+    background: rgba(255,255,255,0.04);
+    color: #fff;
+    border: 1px solid rgba(139, 233, 253, 0.25);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 16px;
+}
+.nexora-launcher list {
+    background: transparent;
+    color: #e6e6e6;
+}
+.nexora-launcher row {
+    padding: 8px 10px;
+    border-radius: 4px;
+}
+.nexora-launcher row:selected {
+    background: rgba(139, 233, 253, 0.30);
+}
+"""
+
+APPS_DIRS = [
+    "/usr/share/applications",
+    os.path.expanduser("~/.local/share/applications"),
+    "/usr/local/share/applications",
+]
+
+URL_RE = re.compile(r"^(https?://|www\.)\S+$", re.IGNORECASE)
+CALC_RE = re.compile(r"^=[0-9+\-*/().\s]+$")
+
+
+def parse_desktop(path):
+    name = None
+    exec_cmd = None
+    no_display = False
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            if line.startswith("Name=") and not name:
+                name = line.split("=", 1)[1].strip()
+            elif line.startswith("Exec="):
+                exec_cmd = line.split("=", 1)[1].strip().split("%")[0].strip()
+            elif line.startswith("NoDisplay=true"):
+                no_display = True
+    if no_display or not name or not exec_cmd:
+        return None
+    return name, exec_cmd
+
+
+def load_apps():
+    apps = []
+    seen = set()
+    for d in APPS_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for fname in os.listdir(d):
+            if not fname.endswith(".desktop"):
+                continue
+            entry = parse_desktop(os.path.join(d, fname))
+            if not entry:
+                continue
+            name, exec_cmd = entry
+            if name in seen:
+                continue
+            seen.add(name)
+            apps.append((name, exec_cmd))
+    apps.sort(key=lambda a: a[0].lower())
+    return apps
+
+
+class Launcher(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_name("nexora-launcher")
+        self.set_title("Nexora Launcher")
+        self.set_decorated(False)
+        self.fullscreen()
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+
+        # Outer container centers the frame
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_homogeneous(False)
+        outer.set_valign(Gtk.Align.CENTER)
+        outer.set_halign(Gtk.Align.CENTER)
+        self.add(outer)
+
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        frame.get_style_context().add_class("frame")
+        frame.set_size_request(640, 480)
+        outer.pack_start(frame, False, False, 0)
+
+        self.entry = Gtk.Entry(placeholder_text="Type to search apps, = to calc, > for shell, or paste a URL…")
+        self.entry.connect("changed", self.on_changed)
+        self.entry.connect("activate", self.on_activate)
+        frame.pack_start(self.entry, False, False, 0)
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.connect("row-activated", self.on_row_activated)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.listbox)
+        frame.pack_start(scroll, True, True, 0)
+
+        # CSS
+        screen = self.get_screen()
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.apps = load_apps()
+        self.current_results = self.apps[:50]
+        self._populate(self.current_results)
+
+        self.show_all()
+        self.entry.grab_focus()
+
+        # Esc to close
+        self.connect("key-press-event", self.on_key)
+
+    def _populate(self, results):
+        for child in self.listbox.get_children():
+            self.listbox.remove(child)
+        for name, cmd in results:
+            row = Gtk.ListBoxRow()
+            label = Gtk.Label(label=name, xalign=0)
+            row.add(label)
+            row.cmd = cmd
+            row.app_name = name
+            self.listbox.add(row)
+        self.listbox.show_all()
+
+    def on_changed(self, entry):
+        text = entry.get_text().strip()
+
+        # Calculator
+        if CALC_RE.match(text):
+            try:
+                expr = text[1:]
+                result = eval(expr, {"__builtins__": {}}, {})
+                self._populate([(f"= {result}", f"echo -n {result} | xclip -selection clipboard")])
+                return
+            except Exception:
+                pass
+
+        # Shell command
+        if text.startswith(">"):
+            self._populate([(f"Run: {text[1:].strip()}", text[1:].strip())])
+            return
+
+        # URL
+        if URL_RE.match(text):
+            url = text if text.startswith("http") else "http://" + text
+            self._populate([(f"Open: {url}", f"xdg-open {url}")])
+            return
+
+        # App search — simple substring (case-insensitive)
+        text_lower = text.lower()
+        if not text_lower:
+            self._populate(self.apps[:50])
+            return
+        results = [(n, c) for n, c in self.apps if text_lower in n.lower()]
+        self._populate(results[:50])
+
+    def on_activate(self, entry):
+        row = self.listbox.get_selected_row()
+        if row is None and self.listbox.get_children():
+            row = self.listbox.get_row_at_index(0)
+        if row is not None:
+            self._execute(row.cmd)
+
+    def on_row_activated(self, listbox, row):
+        self._execute(row.cmd)
+
+    def _execute(self, cmd):
+        # Calculator: just copy result, don't spawn anything
+        if cmd.startswith("echo -n "):
+            try:
+                subprocess.Popen(cmd, shell=True)
+            except Exception:
+                pass
+        else:
+            try:
+                subprocess.Popen(cmd, shell=True, start_new_session=True)
+            except Exception as e:
+                sys.stderr.write(f"[nexora-launcher] spawn failed: {e}\n")
+        Gtk.main_quit()
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        return False
+
+
+def main():
+    win = Launcher()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

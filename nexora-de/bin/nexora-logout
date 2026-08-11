@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+#
+# nexora-logout — logout / reboot / power off confirmation dialog
+#
+# Small dialog so users don't have to remember openbox-logout-command.
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
+import subprocess
+
+CSS = b"""
+.nexora-logout { background-color: rgba(15,32,39,0.92); color: #e6e6e6; font-family: 'Ubuntu','Noto Sans',sans-serif; }
+.nexora-logout .frame { background: rgba(15,32,39,0.98); border: 1px solid rgba(139,233,253,0.30); border-radius: 10px; padding: 20px; }
+.nexora-logout .btn { background: rgba(139,233,253,0.15); border: 1px solid rgba(139,233,253,0.30); border-radius: 6px; padding: 14px 22px; color: #e6e6e6; font-size: 13px; }
+.nexora-logout .btn:hover { background: rgba(139,233,253,0.30); }
+.nexora-logout .danger { background: rgba(255,99,99,0.18); border-color: rgba(255,99,99,0.45); }
+.nexora-logout .title { color: #8be9fd; font-size: 18px; font-weight: bold; padding: 6px 0 14px 0; }
+"""
+
+
+def do_action(cmd):
+    try:
+        subprocess.Popen(cmd, shell=True, start_new_session=True)
+    except Exception:
+        pass
+    Gtk.main_quit()
+
+
+class LogoutDialog(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_name("nexora-logout")
+        self.set_title("Log out of NexoraOS")
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.fullscreen()
+        self.set_opacity(0.96)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_valign(Gtk.Align.CENTER)
+        outer.set_halign(Gtk.Align.CENTER)
+        self.add(outer)
+
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        frame.get_style_context().add_class("frame")
+        frame.set_size_request(620, 200)
+        outer.pack_start(frame, False, False, 0)
+
+        title = Gtk.Label(label="What do you want to do?")
+        title.get_style_context().add_class("title")
+        frame.pack_start(title, False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, homogeneous=True)
+        frame.pack_start(row, True, True, 0)
+
+        def btn(label, css_class, cmd):
+            b = Gtk.Button(label=label)
+            b.get_style_context().add_class("btn")
+            if css_class:
+                b.get_style_context().add_class(css_class)
+            b.connect("clicked", lambda *_: do_action(cmd))
+            return b
+
+        row.pack_start(btn("Cancel", None, "true"), False, False, 0)
+        row.pack_start(btn("Logout", None, "openbox --exit"), False, False, 0)
+        row.pack_start(btn("Restart", None, "systemctl reboot"), False, False, 0)
+        row.pack_start(btn("Shut down", "danger", "systemctl poweroff"), False, False, 0)
+
+        # Esc cancels
+        self.connect("key-press-event", self.on_key)
+        # Click outside the frame cancels
+        self.connect("button-press-event", lambda *_: Gtk.main_quit())
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.show_all()
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        return False
+
+
+def main():
+    win = LogoutDialog()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
