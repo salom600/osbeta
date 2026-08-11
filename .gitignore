@@ -26,3 +26,5 @@ failure-logs/
 *.key
 secrets/
 github_token*
+__pycache__/
+*.pyc
