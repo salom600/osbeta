@@ -2,43 +2,75 @@
 
 ## Quick start (CI)
 
-1. Push to `main`. Watch the **Build NexoraOS ISO** workflow.
-2. On success, find the ISO under [Releases](https://github.com/salom600/osbeta/releases).
-3. On failure, an issue opens automatically; `auto-fix.yml` runs and proposes a PR.
+1. Push to `main`. Watch the **Lint** workflow first.
+2. If lint passes, **Build custom kernel** and **Build NexoraOS ISO** run.
+3. On success, find artifacts at:
+   - Kernel `.deb`: https://github.com/salom600/osbeta/releases (tagged `kernel-v*`)
+   - ISO: https://github.com/salom600/osbeta/releases (tagged `v*`)
+4. On failure, an issue opens automatically; `auto-fix.yml` runs and proposes a PR.
 
-## Local build on Arch Linux
+## Local build
+
+### Build the kernel (Linux 6.12 LTS .deb)
+
+Requirements: build-essential, libssl-dev, libelf-dev, bc, cpio, kmod, ccache, wget.
 
 ```bash
-sudo pacman -S --needed archiso archlinux-keyring docker
-git clone https://github.com/salom600/osbeta.git
-cd osbeta
+# On Debian/Ubuntu host:
+sudo apt install build-essential libssl-dev libelf-dev bc cpio kmod rsync wget ccache
 
-# Build inside Docker (recommended on non-Arch hosts too)
-./scripts/build-local.sh --docker
+# On Arch host:
+sudo pacman -S base-devel libelf openssl ccache wget
 
-# Or build natively (requires Arch host + archiso package)
-./scripts/build-local.sh
+# Build:
+./kernel/build.sh                # builds Linux 6.12.10 (default)
+KVER=6.12.10 ./kernel/build.sh   # explicit version
+
+# Output:
+ls -lh work/kernel-out/
+# linux-image-6.12.10-nexora1_6.12.10-nexora1-1_amd64.deb
+# linux-headers-6.12.10-nexora1_6.12.10-nexora1-1_amd64.deb
+# linux-libc-dev_6.12.10-nexora1-1_amd64.deb
 ```
 
-Output: `out/nexora-<version>-x86_64.iso` (+ `.sha256sum` + `build.log`).
+Build time: ~45-90 min on first run, ~20-30 min with ccache on rebuilds.
 
-## Smoke-test in QEMU
+### Build the ISO
+
+Requirements: Docker (we build inside a `debian:trixie` container).
+
+```bash
+# Ensure the kernel .deb packages exist at work/kernel-out/
+ls work/kernel-out/*.deb
+
+# Build:
+./debian-live/build.sh
+
+# Output:
+ls -lh out/
+# nexora-<version>-amd64.iso
+# nexora-<version>-amd64.iso.sha256sum
+# build.log
+```
+
+### Smoke-test in QEMU
 
 ```bash
 ./scripts/test-iso.sh bios    # BIOS boot
 ./scripts/test-iso.sh uefi    # UEFI boot (requires OVMF)
 ```
 
-## Manual workflow dispatch (with custom tag)
+## Manual workflow dispatch
 
 1. Go to **Actions → Build NexoraOS ISO → Run workflow**.
 2. Set `version_tag` (e.g. `2026.1-rc1`) and `make_release: true`.
-3. The workflow runs, builds, and creates a release tagged `v2026.1-rc1`.
+3. Set `use_custom_kernel: true` to download the latest kernel .deb from CI artifacts.
+4. The workflow runs, builds, and creates a release tagged `v2026.1-rc1`.
 
 ## Iterating on NexoraDE scripts without rebuilding the ISO
 
 ```bash
-./scripts/dev-setup.sh    # installs deps
+./scripts/dev-setup.sh    # installs deps on Debian/Ubuntu
 ./nexora-de/bin/nexora-panel       # test panel
 ./nexora-de/bin/nexora-launcher    # test launcher (W-r in Openbox)
 ./nexora-de/bin/nexora-settings    # test settings
@@ -54,21 +86,18 @@ To test inside an existing Openbox session, add to `~/.config/openbox/autostart`
 
 1. Download the `build.log` artifact from the failed run.
 2. Common issues:
-   - `target not found: <pkg>` — package no longer in repos; remove from `packages.x86_64`.
-   - PGP signature errors — keyring out of date; the workflow already does `pacman-key --populate`. If still failing, add `pacman-key --refresh-keys`.
-   - Disk full in Actions runner — `--free disk space` step should help; if still failing, trim large packages (libreoffice-fresh, jdk*, etc.).
-   - Docker `permission denied` — make sure the `--privileged` flag is present (it is).
+   - `E: Unable to locate package <pkg>` — package not in trixie; remove from `nexora.list.chroot`.
+   - PGP signature errors — apt keyring out of date; the build installs `debian-archive-keyring` fresh.
+   - Disk full in Actions runner — the `Free disk space` step should help; trim large packages (nvidia-driver, linux-image-amd64 + headers).
+   - `debootstrap` failed — usually network or mirror issue; check `build.log` for the failing URL.
 
 3. The `auto-fix.yml` workflow already handles the most common cases automatically.
 
-## Reproducibility
-
-- The build uses the official `archlinux:latest` Docker image at build time, so package versions are pinned to whatever was in the Arch repos on the build date.
-- For bit-for-bit reproducible ISOs you'd need to pin specific package versions; out of scope for the beta.
-
 ## Output naming convention
 
-- ISO: `nexora-<version>-x86_64.iso`
-- Checksum: `nexora-<version>-x86_64.iso.sha256sum`
+- Kernel: `linux-image-<kver>-nexora1_<kver>-nexora1-1_amd64.deb`
+- ISO: `nexora-<version>-amd64.iso`
+- Checksum: `nexora-<version>-amd64.iso.sha256sum`
 - Build log: `build.log`
-- Release tag: `v<version>` (e.g. `v2026.1-beta1`)
+- Kernel release tag: `kernel-v<kver>` (e.g. `kernel-v6.12.10`)
+- ISO release tag: `v<version>` (e.g. `v2026.1-beta1`)

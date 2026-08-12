@@ -1,0 +1,214 @@
+#!/bin/sh
+#
+# live-build chroot hook — 01-nexora-setup
+# Runs INSIDE the chroot during the chroot stage of live-build.
+# Sets up:
+#   - nexora user (auto-login)
+#   - /etc/skel defaults (Openbox config, bashrc, xprofile)
+#   - Locale generation
+#   - systemd service enabling
+#   - LightDM autologin
+#   - /etc/os-release branding
+#
+
+set -e
+
+echo "==> [nexora-setup] Configuring NexoraOS live chroot..."
+
+# ---- 1. Generate locales ----
+echo "==> Generating locales..."
+sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen
+locale-gen
+
+# ---- 2. Create nexora user ----
+echo "==> Creating 'nexora' user..."
+# Ensure all secondary groups exist first
+for g in wheel storage power network video audio input lp autologin sudo nopasswdlogin; do
+    getent group "$g" >/dev/null 2>&1 || groupadd -f "$g"
+done
+if ! id nexora >/dev/null 2>&1; then
+    useradd -m -G sudo,storage,power,video,audio,input,lp,autologin -s /bin/bash nexora
+    echo 'nexora:nexora' | chpasswd
+    # Passwordless sudo for the live session
+    echo 'nexora ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/010-nexora-nopasswd
+    chmod 440 /etc/sudoers.d/010-nexora-nopasswd
+fi
+
+# Add nexora to autologin group (created above)
+usermod -aG autologin nexora || true
+
+# ---- 3. Seed /etc/skel ----
+echo "==> Seeding /etc/skel..."
+install -d /etc/skel/.config/openbox
+install -d /etc/skel/.config/nexora
+install -d /etc/skel/.config/gtk-3.0
+install -d /etc/skel/Desktop
+install -d /etc/skel/Downloads
+install -d /etc/skel/Documents
+install -d /etc/skel/Pictures
+install -d /etc/skel/Music
+install -d /etc/skel/Videos
+
+cat > /etc/skel/.config/openbox/autostart <<'AUTOSTART'
+# NexoraDE autostart
+xset -dpms s off s noblank 2>/dev/null || true
+setxkbmap -option terminate:ctrl_alt_bksp 2>/dev/null || true
+/usr/lib/polkit-1/polkitd --no-debug &
+/usr/libexec/polkit-gnome-authentication-agent-1 &
+/usr/local/bin/nexora-panel &
+nm-applet --no-agent &
+volumeicon &
+/usr/bin/xdg-user-dirs-update 2>/dev/null || true
+AUTOSTART
+
+cat > /etc/skel/.config/openbox/rc.xml <<'RCXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse></focus>
+  <placement><policy>Smart</policy><center>yes</center></placement>
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout>NLIMC</titleLayout>
+    <font place="ActiveWindow"><name>Ubuntu</name><size>11</size><weight>Bold</weight></font>
+    <font place="MenuHeader"><name>Ubuntu</name><size>11</size></font>
+    <font place="MenuItem"><name>Ubuntu</name><size>10</size></font>
+  </theme>
+  <desktops><number>2</number><firstdesk>1</firstdesk><names><name>Workspace 1</name><name>Workspace 2</name></names></desktops>
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+    <keybind key="W-r"><action name="Execute"><command>nexora-launcher</command></action></keybind>
+    <keybind key="W-Return"><action name="Execute"><command>lxterminal</command></action></keybind>
+    <keybind key="W-e"><action name="Execute"><command>pcmanfm</command></action></keybind>
+    <keybind key="W-s"><action name="Execute"><command>nexora-store</command></action></keybind>
+    <keybind key="W-F4"><action name="Execute"><command>nexora-logout</command></action></keybind>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-S-Tab"><action name="PreviousWindow"/></keybind>
+    <keybind key="W-d"><action name="ToggleShowDesktop"/></keybind>
+    <keybind key="W-1"><action name="Desktop"><desktop>1</desktop></action></keybind>
+    <keybind key="W-2"><action name="Desktop"><desktop>2</desktop></action></keybind>
+  </keyboard>
+  <mouse>
+    <context name="Frame">
+      <mousebind button="A-Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+  </mouse>
+  <menu><file>menu.xml</file><hideDelay>200</hideDelay></menu>
+  <applications/>
+</openbox_config>
+RCXML
+
+cat > /etc/skel/.config/openbox/menu.xml <<'MENUXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="NexoraOS">
+    <item label="Nexora Launcher"><action name="Execute"><command>nexora-launcher</command></action></item>
+    <item label="Terminal"><action name="Execute"><command>lxterminal</command></action></item>
+    <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>
+    <item label="Nexora Store"><action name="Execute"><command>nexora-store</command></action></item>
+    <item label="Web Browser"><action name="Execute"><command>firefox-esr</command></action></item>
+    <separator/>
+    <menu id="settings" label="Settings">
+      <item label="Nexora Settings"><action name="Execute"><command>nexora-settings</command></action></item>
+      <item label="Appearance"><action name="Execute"><command>lxappearance</command></action></item>
+      <item label="Displays"><action name="Execute"><command>arandr</command></action></item>
+    </menu>
+    <separator/>
+    <item label="Install NexoraOS"><action name="Execute"><command>nexora-installer</command></action></item>
+    <item label="Logout"><action name="Execute"><command>nexora-logout</command></action></item>
+  </menu>
+</openbox_menu>
+MENUXML
+
+cat > /etc/skel/.xprofile <<'XPROFILE'
+export GTK_THEME=Adwaita:dark
+export QT_QPA_PLATFORMTHEME=gtk3
+export XDG_CURRENT_DESKTOP=Nexora
+export XDG_SESSION_DESKTOP=nexora
+export XDG_SESSION_TYPE=x11
+export SAL_USE_VCLPLUGIN=gtk3
+export MOZ_ENABLE_WAYLAND=0
+export _JAVA_AWT_WM_NONREPARENTING=1
+XPROFILE
+
+cat > /etc/skel/.bashrc <<'BASHRC'
+# NexoraOS .bashrc
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias update='sudo apt update && sudo apt upgrade'
+alias install='sudo apt install'
+alias search='apt search'
+alias store='nexora-store'
+
+export PS1='\[\e[36m\]\u@\h\[\e[0m\] \[\e[34m\]\w\[\e[0m\] \$ '
+export EDITOR=nano
+export VISUAL=nano
+export PATH="$PATH:/usr/local/bin"
+
+if command -v starship &>/dev/null; then
+    eval "$(starship init bash)"
+fi
+BASHRC
+
+# Copy skeleton into nexora's home
+cp -r /etc/skel/. /home/nexora/
+chown -R nexora:nexora /home/nexora
+
+# ---- 4. Enable services ----
+echo "==> Enabling systemd services..."
+systemctl enable NetworkManager
+systemctl enable lightdm
+systemctl enable bluetooth
+systemctl enable systemd-timesyncd
+systemctl enable haveged
+systemctl enable udisks2
+systemctl enable polkit
+systemctl enable ufw 2>/dev/null || true
+systemctl enable apparmor 2>/dev/null || true
+systemctl enable fail2ban 2>/dev/null || true
+systemctl enable tlp 2>/dev/null || true
+systemctl enable cron
+systemctl enable anacron 2>/dev/null || true
+systemctl enable rsync
+systemctl enable fstrim.timer 2>/dev/null || true
+systemctl enable qemu-guest-agent 2>/dev/null || true
+systemctl enable spice-vdagentd 2>/dev/null || true
+systemctl enable vmtoolsd 2>/dev/null || true
+
+# ---- 5. Set timezone UTC ----
+ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+
+# ---- 6. Make Nexora binaries executable (just in case) ----
+chmod 0755 /usr/local/bin/nexora-* 2>/dev/null || true
+
+# ---- 7. Set permissions on /etc/shadow, /etc/gshadow ----
+chmod 0640 /etc/shadow
+chmod 0640 /etc/gshadow
+
+# ---- 8. Generate default wallpaper (procedural) ----
+mkdir -p /usr/share/backgrounds
+if command -v convert >/dev/null 2>&1; then
+    convert -size 1920x1080 \
+        -define gradient:angle=135 \
+        gradient:'#0f2027'-'#203a43'-'#2c5364' \
+        -gravity south -pointsize 24 -fill white -annotate +40+30 'NexoraOS 2026' \
+        /usr/share/backgrounds/nexora-default.png 2>/dev/null || true
+fi
+
+# ---- 9. Custom mkinitramfs config for live boot ----
+cat > /etc/initramfs-tools/conf.d/nexora.conf <<'INITRAMFS'
+# Compress initramfs with zstd for faster boot
+COMPRESS=zstd
+# Set modules to load early for broad hardware support
+MODULES=most
+INITRAMFS
+
+echo "==> [nexora-setup] Done."

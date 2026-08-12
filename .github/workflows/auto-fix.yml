@@ -87,19 +87,37 @@ jobs:
           # Common failure patterns and their fixes
           patterns = [
               {
-                  "name": "package_not_found",
-                  "regex": r"error: target not found: (\S+)|error: could not find (\S+)",
+                  "name": "package_not_found_apt",
+                  "regex": r"E: Unable to locate package (\S+)|E: Package '(\S+)' has no installation candidate",
                   "fix": "remove_package",
-                  "description": "Package not found in repos — remove from package list."
+                  "description": "Package not found in Debian repos — remove from package list."
               },
               {
-                  "name": "broken_signature",
+                  "name": "package_not_found_pacman",
+                  "regex": r"error: target not found: (\S+)|error: could not find (\S+)",
+                  "fix": "remove_package",
+                  "description": "Package not found in Arch repos — remove from package list."
+              },
+              {
+                  "name": "broken_signature_apt",
+                  "regex": r"GPG error.*NO_PUBKEY|The repository .* is not signed",
+                  "fix": "refresh_keyring",
+                  "description": "PGP signature failure — refresh debian-archive-keyring."
+              },
+              {
+                  "name": "broken_signature_pacman",
                   "regex": r"invalid or corrupted database \(PGP signature\)|signature from .* is unknown trust",
                   "fix": "refresh_keyring",
                   "description": "PGP signature failure — refresh archlinux-keyring."
               },
               {
-                  "name": "missing_dependency",
+                  "name": "missing_dependency_apt",
+                  "regex": r"depends: (\S+) however|E: Unmet dependencies|E: Unable to correct problems, you have held broken packages",
+                  "fix": "add_package",
+                  "description": "Missing dependency — add to package list."
+              },
+              {
+                  "name": "missing_dependency_pacman",
                   "regex": r"missing dependency: (\S+)",
                   "fix": "add_package",
                   "description": "Missing dependency — add to package list."
@@ -144,12 +162,14 @@ jobs:
           # Determine which file(s) to patch
           patchable_files = []
           if any(m["fix"] in ("remove_package","add_package") for m in matches):
-              patchable_files.append("archiso/profile/packages.x86_64")
-              patchable_files.append("archiso/profile/airootfs/etc/calamares/modules/packages.conf")
+              patchable_files.append("debian-live/config/package-lists/nexora.list.chroot")
+              patchable_files.append("nexora-installer/nexora-installer")
           if any(m["fix"] == "refresh_keyring" for m in matches):
               patchable_files.append(".github/workflows/build-iso.yml")
+              patchable_files.append("debian-live/build.sh")
           if any(m["fix"] == "profile_syntax" for m in matches):
-              patchable_files.append("archiso/profile/profiledef.sh")
+              patchable_files.append("kernel/configs/x86_64_defconfig")
+              patchable_files.append("debian-live/config/hooks/normal/01-nexora-setup.hook.chroot")
 
           result = {
               "matches": matches,
@@ -189,8 +209,8 @@ jobs:
                   for g in m.get("captured_groups", []):
                       if g:
                           pkgs_to_remove.add(g.strip())
-              # Remove from packages.x86_64
-              pkgfile = Path("archiso/profile/packages.x86_64")
+              # Remove from debian-live/config/package-lists/nexora.list.chroot
+              pkgfile = Path("debian-live/config/package-lists/nexora.list.chroot")
               if pkgfile.exists():
                   original = pkgfile.read_text()
                   new = original
@@ -201,16 +221,6 @@ jobs:
                       pkgfile.write_text(new)
                       commits.append(f"auto-fix: remove unavailable package(s): {', '.join(sorted(pkgs_to_remove))}")
 
-              # Also remove from calamares packages.conf
-              calfile = Path("archiso/profile/airootfs/etc/calamares/modules/packages.conf")
-              if calfile.exists():
-                  original = calfile.read_text()
-                  new = original
-                  for pkg in pkgs_to_remove:
-                      new = re.sub(rf"^\s*-\s*{re.escape(pkg)}$", f"      # REMOVED (auto-fix): {pkg}", new, flags=re.MULTILINE)
-                  if new != original:
-                      calfile.write_text(new)
-
           # --- add_package (missing deps) ---
           if "add_package" in by_fix:
               pkgs_to_add = set()
@@ -219,7 +229,7 @@ jobs:
                       if g:
                           pkgs_to_add.add(g.strip())
               if pkgs_to_add:
-                  pkgfile = Path("archiso/profile/packages.x86_64")
+                  pkgfile = Path("debian-live/config/package-lists/nexora.list.chroot")
                   if pkgfile.exists():
                       original = pkgfile.read_text()
                       addition = "\n# auto-fix: added missing dependencies\n" + "\n".join(sorted(pkgs_to_add)) + "\n"
@@ -231,13 +241,13 @@ jobs:
               wf = Path(".github/workflows/build-iso.yml")
               if wf.exists():
                   txt = wf.read_text()
-                  if "pacman-key --refresh-keys" not in txt:
+                  if "apt-get install -y debian-archive-keyring" in txt and "--reinstall" not in txt:
                       txt = txt.replace(
-                          "pacman-key --populate archlinux",
-                          "pacman-key --populate archlinux\n              pacman-key --refresh-keys || true"
+                          "apt-get install -y debian-archive-keyring",
+                          "apt-get install -y --reinstall debian-archive-keyring && apt-key update 2>/dev/null || true"
                       )
                       wf.write_text(txt)
-                      commits.append("auto-fix: refresh PGP keyring before build")
+                      commits.append("auto-fix: reinstall + refresh debian-archive-keyring")
 
           # --- add_python_dep ---
           if "add_python_dep" in by_fix:
@@ -246,10 +256,10 @@ jobs:
                   for g in m.get("captured_groups", []):
                       if g:
                           mods_to_add.add(g.strip())
-              pkgfile = Path("archiso/profile/packages.x86_64")
+              pkgfile = Path("debian-live/config/package-lists/nexora.list.chroot")
               if pkgfile.exists():
                   original = pkgfile.read_text()
-                  addition = "\n# auto-fix: missing python modules\n" + "\n".join(f"python-{m}" for m in sorted(mods_to_add)) + "\n"
+                  addition = "\n# auto-fix: missing python modules\n" + "\n".join(f"python3-{m}" for m in sorted(mods_to_add)) + "\n"
                   pkgfile.write_text(original + addition)
                   commits.append(f"auto-fix: add missing python modules: {', '.join(sorted(mods_to_add))}")
 

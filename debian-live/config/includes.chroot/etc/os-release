@@ -1,0 +1,13 @@
+NAME="NexoraOS"
+ID=nexora
+ID_LIKE=debian
+VERSION="2026.1 (Vortex)"
+VERSION_ID=2026.1
+VERSION_CODENAME=vortex
+PRETTY_NAME="NexoraOS 2026.1 (Vortex)"
+ANSI_COLOR="0;36"
+HOME_URL="https://github.com/salom600/osbeta"
+DOCUMENTATION_URL="https://github.com/salom600/osbeta/wiki"
+SUPPORT_URL="https://github.com/salom600/osbeta/issues"
+BUG_REPORT_URL="https://github.com/salom600/osbeta/issues"
+LOGO=nexora

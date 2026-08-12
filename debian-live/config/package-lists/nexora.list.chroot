@@ -1,0 +1,413 @@
+#
+# NexoraOS live ISO package list (Debian 13 Trixie, amd64)
+# ---------------------------------------------------------
+# Format: one package per line, comments start with #.
+# live-build installs ALL of these into the chroot before producing the ISO.
+#
+# Rules:
+#   - Only packages available in Debian trixie main/contrib/non-free
+#   - No VirtualBox host packages (removed per project requirement)
+#   - virtualbox-guest-* is included so NexoraOS runs smoothly AS A GUEST
+#   - Keep total install under ~2.5 GB so the ISO stays <1.5 GB after squashfs
+#
+
+## ---- base system ----
+base-files
+base-passwd
+bash
+bash-completion
+bsdutils
+coreutils
+debian-archive-keyring
+debianutils
+diffutils
+dpkg
+e2fsprogs
+fdisk
+file
+findutils
+gcc-14-base
+grep
+gzip
+hostname
+init-system-helpers
+login
+logsave
+mount
+ncurses-base
+ncurses-bin
+passwd
+perl-base
+sed
+sensible-utils
+sysvinit-utils
+tar
+util-linux
+zlib1g
+
+## ---- init + service manager ----
+systemd
+systemd-sysv
+systemd-timesyncd
+dbus
+libpam-systemd
+
+## ---- package management + apt ----
+apt
+apt-utils
+apt-listchanges
+
+## ---- bootloader (installed on target disk by installer) ----
+grub-pc
+grub-efi-amd64
+grub-efi-amd64-bin
+grub2-common
+efibootmgr
+mtools
+
+## ---- live-build helpers (needed inside the live image) ----
+live-boot
+live-boot-initramfs-tools
+live-config
+live-config-systemd
+calamares-settings-debian
+
+## ---- kernel (use stock Debian kernel as fallback if our custom build isn't ready) ----
+linux-image-amd64
+linux-headers-amd64
+
+## ---- CPU microcode ----
+intel-microcode
+amd64-microcode
+
+## ---- firmware for wireless/GPU/etc. ----
+firmware-linux
+firmware-linux-nonfree
+firmware-misc-nonfree
+firmware-amd-graphics
+firmware-iwlwifi
+firmware-realtek
+firmware-intel-sound
+firmware-bnx2
+firmware-bnx2x
+firmware-brcm80211
+firmware-cavium
+firmware-qcom-soc
+firmware-atheros
+
+## ---- filesystem tools ----
+btrfs-progs
+e2fsprogs
+dosfstools
+exfatprogs
+ntfs-3g
+f2fs-tools
+xfsprogs
+udisks2
+policykit-1-gnome
+
+## ---- networking ----
+network-manager
+network-manager-gnome
+modemmanager
+mobile-broadband-provider-info
+wpasupplicant
+bluetooth
+bluez
+bluez-tools
+openssh-client
+openssh-server
+wget
+curl
+rsync
+avahi-daemon
+avahi-utils
+nss-mdns
+nftables
+iptables
+openvpn
+wireguard-tools
+dnsmasq
+traceroute
+mtr-tiny
+nmap
+bind9-host
+whois
+net-tools
+iproute2
+iputils-ping
+tcpdump
+
+## ---- audio (PipeWire) ----
+pipewire
+pipewire-pulse
+pipewire-alsa
+pipewire-audio
+pipewire-jack
+wireplumber
+libspa-0.2-bluetooth
+libspa-0.2-jack
+pulseaudio-utils
+alsa-utils
+alsa-tools
+alsa-tools-gui
+sof-firmware
+
+## ---- X11 + Wayland ----
+xorg
+xorg-server
+xserver-xorg
+xserver-xorg-video-all
+xserver-xorg-video-intel
+xserver-xorg-video-amdgpu
+xserver-xorg-video-radeon
+xserver-xorg-video-nouveau
+xserver-xorg-video-vesa
+xserver-xorg-video-fbdev
+xserver-xorg-video-vmware
+xserver-xorg-input-all
+xserver-xorg-input-libinput
+xserver-xorg-input-evdev
+xserver-xorg-input-synaptics
+xinit
+x11-xserver-utils
+x11-utils
+x11-apps
+x11-common
+xfonts-base
+xfonts-100dpi
+xfonts-75dpi
+xfonts-utils
+xauth
+xrdb
+xserver-xorg-legacy
+wayland
+weston
+libwayland-server0
+libwayland-client0
+xwayland
+
+## ---- fonts (broad CJK + Arabic + Latin) ----
+fonts-dejavu
+fonts-liberation
+fonts-noto
+fonts-noto-cjk
+fonts-noto-color-emoji
+fonts-ubuntu
+fonts-roboto-core
+fonts-croscore
+fonts-firacode
+fonts-hack-ttf
+fonts-jetbrains-mono
+
+## ---- GTK / GLib / Python (NexoraDE runtime) ----
+python3
+python3-gi
+python3-gi-cairo
+python3-dbus
+python3-psutil
+python3-requests
+python3-yaml
+python3-pillow
+python3-pip
+python3-archinstall
+python3-setuptools
+gir1.2-gtk-3.0
+gir1.2-glib-2.0
+gir1.2-pango-1.0
+gir1.2-gdkpixbuf-2.0
+gir1.2-appindicator3-0.1
+libgtk-3-0
+libgtk-4-1
+libglib2.0-0
+libcairo2
+librsvg2-2
+libpango-1.0-0
+libgdk-pixbuf-2.0-0
+libnotify-bin
+notification-daemon
+dunst
+
+## ---- window manager (NexoraDE foundation) ----
+openbox
+obconf
+libxml2
+libstartup-notification0
+
+## ---- display manager (auto-login to nexora) ----
+lightdm
+lightdm-gtk-greeter
+accountsservice
+
+## ---- desktop utilities (lightweight) ----
+pcmanfm
+libfm-tools
+lxappearance
+lxinput
+lxsession
+lxterminal
+feh
+hsetroot
+xcompmgr
+picom
+arandr
+volumeicon-alsa
+pavucontrol
+gnome-keyring
+libsecret-tools
+seahorse
+file-roller
+galculator
+mousepad
+xed
+evince
+ristretto
+ffmpeg
+ffmpegthumbnailer
+poppler-utils
+
+## ---- browsers / internet ----
+firefox-esr
+transmission-gtk
+
+## ---- media (small footprint) ----
+vlc
+mpv
+gimp
+
+## ---- gaming (minimal; users install full set via Store) ----
+gamemode
+libgl1-mesa-dri
+libgl1-mesa-glx
+libegl1-mesa
+libglx-mesa0
+mesa-vulkan-drivers
+libvulkan1
+vulkan-tools
+libva2
+libva-mesa-driver
+intel-media-va-driver
+mesa-utils
+
+## ---- NVIDIA (only load if NVIDIA card is present) ----
+nvidia-driver
+nvidia-kernel-dkms
+nvidia-vdpau-driver
+# Note: NVIDIA DKMS builds at install time. The .deb is large but ensures
+# compatibility with all NVIDIA cards from 2012+ on first boot.
+
+## ---- VirtualBox guest (so NexoraOS runs smoothly as a VM guest) ----
+# NO virtualbox (host) packages — removed per requirement.
+virtualbox-guest-utils
+virtualbox-guest-x11
+# Also QEMU / VMware / Spice guest agents for smooth VM integration:
+qemu-guest-agent
+spice-vdagent
+open-vm-tools
+open-vm-tools-desktop
+hyperv-daemons
+xserver-xorg-video-qxl
+
+## ---- power + laptop ----
+upower
+powertop
+tlp
+acpid
+acpi
+acpi-support
+smartmontools
+dmidecode
+lshw
+hwinfo
+inxi
+usbutils
+pciutils
+nvme-cli
+
+## ---- themes / icons ----
+papirus-icon-theme
+breeze-icon-theme
+adwaita-icon-theme
+hicolor-icon-theme
+gnome-themes-extra
+gtk2-engines-murrine
+
+## ---- installer ----
+calamares
+calamares-settings-debian
+python3-calamares
+
+## ---- security ----
+ufw
+gufw
+firejail
+apparmor
+apparmor-utils
+libpam-apparmor
+fail2ban
+keepassxc
+gnupg
+pinentry-gtk2
+seahorse
+
+## ---- development (minimal — gcc/make for DKMS) ----
+gcc
+g++
+make
+build-essential
+pkg-config
+git
+git-man
+gh
+vim
+neovim
+nano
+
+## ---- shell extras ----
+zsh
+fish
+starship
+tmux
+screen
+htop
+btop
+fastfetch
+neofetch
+bat
+eza
+fd-find
+ripgrep
+fzf
+tree
+jq
+yq
+p7zip-full
+rar
+unrar
+unzip
+zip
+xz-utils
+
+## ---- documentation ----
+man-db
+manpages
+manpages-dev
+info
+
+## ---- locale generation ----
+locales
+console-setup
+keyboard-configuration
+
+## ---- Misc ----
+less
+most
+pv
+cron
+anacron
+rsyslog
+logrotate
+ca-certificates
+gnupg2
+haveged
+irqbalance

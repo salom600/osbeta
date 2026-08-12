@@ -21,6 +21,11 @@ on:
         type: boolean
         required: false
         default: false
+      use_custom_kernel:
+        description: 'Download and use the latest custom kernel from the kernel workflow'
+        type: boolean
+        required: false
+        default: true
 
 env:
   ISO_NAME: nexora
@@ -28,40 +33,35 @@ env:
 
 jobs:
   build:
-    name: Build x86_64 ISO (BIOS + UEFI)
+    name: Build ISO (Debian live-build, BIOS + UEFI)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: write
       actions: write
       issues: write
-      packages: write
 
     outputs:
       version: ${{ steps.ver.outputs.version }}
       iso_path: ${{ steps.build.outputs.iso_path }}
+      size_mb: ${{ steps.size.outputs.size_mb }}
+      uploadable: ${{ steps.size.outputs.uploadable }}
 
     steps:
-      # ---- 1. Checkout ----
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ---- 2. Free up disk space ----
       - name: Free disk space
         run: |
           set -x
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
-          sudo apt-get -y purge \
-            azure-cli ghc* google* dotnet* powershell firefox \
-            temurin-* mono-devel ruby-full || true
+          sudo apt-get -y purge azure-cli ghc* google* dotnet* powershell temurin-* mono-devel ruby-full || true
           sudo apt-get -y autoremove --purge
           sudo apt-get -y clean
           df -h /
 
-      # ---- 3. Detect version ----
-      - name: Compute version string
+      - name: Compute version
         id: ver
         run: |
           if [ -n "${{ inputs.version_tag }}" ]; then
@@ -71,62 +71,85 @@ jobs:
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "iso_label=NEXORA_$(date +%Y%m)" >> "$GITHUB_OUTPUT"
-          echo "Building version: $V"
 
-      # ---- 4. Build ISO in Docker container (official archlinux image) ----
-      - name: Build NexoraOS ISO
-        id: build
+      - name: Install live-build + dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            live-build debian-archive-keyring squashfs-tools xorriso \
+            isolinux syslinux-common grub-pc-bin grub-efi-amd64-bin \
+            mtools dosfstools wget curl jq
+
+      - name: Download latest custom kernel .deb (optional)
+        if: ${{ inputs.use_custom_kernel == true || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: |
           set -euo pipefail
-          mkdir -p work out
+          mkdir -p work/kernel-out
+          # Find the latest successful kernel workflow run
+          echo "==> Looking for latest kernel build..."
+          KERNEL_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build-kernel.yml/runs?status=success&per_page=5" \
+            | jq -r '.workflow_runs[0].id // empty')
+          if [ -z "$KERNEL_RUN_ID" ]; then
+            echo "No successful kernel build found. Will fall back to Debian stock kernel."
+          else
+            echo "==> Found kernel run ID: $KERNEL_RUN_ID"
+            ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$KERNEL_RUN_ID/artifacts" \
+              | jq -r '.artifacts[] | select(.name | startswith("nexora-kernel-")) | .archive_download_url' | head -1)
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "==> Downloading kernel artifact..."
+              curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -o kernel-artifact.zip "$ARTIFACT_URL"
+              unzip -o kernel-artifact.zip -d work/kernel-out/
+              rm kernel-artifact.zip
+              echo "==> Custom kernel packages:"
+              ls -lh work/kernel-out/*.deb
+            fi
+          fi
 
-          # Run archiso inside the official archlinux:latest image
-          # We mount the repo so the container can read archiso/profile/
-          # and write the built ISO to ./out/
+      - name: Build ISO via live-build
+        id: build
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ISO_LABEL: ${{ steps.ver.outputs.iso_label }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          # Build inside a docker container so we have a clean Debian environment
+          # for live-build (which expects apt sources to work).
           docker run --rm \
             -v "$PWD":/work \
             -w /work \
             --privileged \
-            -e ISO_VERSION="${{ steps.ver.outputs.version }}" \
-            -e ISO_LABEL="${{ steps.ver.outputs.iso_label }}" \
-            archlinux:latest \
+            -e VERSION="$VERSION" \
+            -e ISO_LABEL="$ISO_LABEL" \
+            debian:trixie \
             bash -euo pipefail -c '
-              echo "==> Updating container..."
-              sed -i "s/^#ParallelDownloads.*/ParallelDownloads = 8/" /etc/pacman.conf
-              pacman -Sy --noconfirm --needed archiso archlinux-keyring sudo grub syslinux mtools dosfstools squashfs-tools
+              echo "==> Installing live-build in container..."
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                live-build debian-archive-keyring sudo wget curl xorriso \
+                squashfs-tools isolinux syslinux-common grub-pc-bin grub-efi-amd64-bin \
+                mtools dosfstools ca-certificates
 
-              echo "==> Initializing keyring..."
-              pacman-key --init
-              pacman-key --populate archlinux
-
-              echo "==> Patching profiledef version..."
-              sed -i "s/^iso_version=.*/iso_version=\"${ISO_VERSION}\"/" /work/archiso/profile/profiledef.sh
-              sed -i "s/^iso_label=.*/iso_label=\"${ISO_LABEL}\"/" /work/archiso/profile/profiledef.sh
-
-              echo "==> Running mkarchiso..."
+              echo "==> Building NexoraOS ISO via live-build..."
               cd /work
-              mkarchiso -v -w ./work -o ./out ./archiso/profile 2>&1 | tee ./work/build.log
-
-              echo "==> Built ISO:"
-              ls -lh ./out/
+              VERSION="$VERSION" ISO_NAME="nexora" ISO_LABEL="$ISO_LABEL" \
+                ./debian-live/build.sh 2>&1 | tee out/build.log
             '
 
-          # Verify ISO exists
           ISO_FILE=$(ls out/*.iso 2>/dev/null | head -1 || true)
           if [ -z "$ISO_FILE" ]; then
             echo "ERROR: No ISO produced. Build log:"
-            cat work/build.log 2>/dev/null || true
+            tail -100 out/build.log
             exit 1
           fi
           echo "iso_path=$ISO_FILE" >> "$GITHUB_OUTPUT"
-          echo "iso_name=$(basename $ISO_FILE)" >> "$GITHUB_OUTPUT"
           sha256sum "$ISO_FILE" > "$ISO_FILE.sha256sum"
           echo "iso_sha_path=$ISO_FILE.sha256sum" >> "$GITHUB_OUTPUT"
 
-          # Capture build log
-          cp work/build.log out/build.log || true
-
-      # ---- 5. Upload artifact ----
       - name: Upload ISO as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -138,7 +161,6 @@ jobs:
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           compression-level: 0
 
-      # ---- 6. Create release (only on push to main or explicit dispatch) ----
       - name: Check ISO size against GitHub release limit
         id: size
         run: |
@@ -147,14 +169,13 @@ jobs:
           SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
           echo "size_bytes=$SIZE_BYTES" >> "$GITHUB_OUTPUT"
           echo "size_mb=$SIZE_MB" >> "$GITHUB_OUTPUT"
-          # GitHub release asset limit is 2 GiB = 2147483648 bytes
           if [ "$SIZE_BYTES" -lt 2147483648 ]; then
             echo "uploadable=true" >> "$GITHUB_OUTPUT"
             echo "ISO is ${SIZE_MB} MB — under 2 GiB limit, will upload to release."
           else
             echo "uploadable=false" >> "$GITHUB_OUTPUT"
             echo "ISO is ${SIZE_MB} MB — exceeds 2 GiB GitHub release limit."
-            echo "The ISO will still be available as a CI artifact (10 GB limit)."
+            echo "Available as CI artifact (10 GB limit, 30-day retention)."
           fi
 
       - name: Compose release notes
@@ -166,23 +187,25 @@ jobs:
           Automated build from commit \`${{ github.sha }}\`.
 
           **ISO size:** ${{ steps.size.outputs.size_mb }} MB
+          **Base:** Debian 13 (Trixie) + NexoraDE
+          **Boot:** hybrid BIOS + UEFI
 
           ## Download
           EOF
           if [ "${{ steps.size.outputs.uploadable }}" = "true" ]; then
-            echo "- \`nexora-${{ steps.ver.outputs.version }}-x86_64.iso\` — bootable hybrid ISO (BIOS + UEFI)" >> /tmp/release-notes.md
+            echo "- \`nexora-${{ steps.ver.outputs.version }}-amd64.iso\` — bootable hybrid ISO (BIOS + UEFI)" >> /tmp/release-notes.md
           else
             echo "- ⚠ **ISO NOT attached** — exceeds GitHub's 2 GiB asset limit." >> /tmp/release-notes.md
             echo "  Download it from the [Actions workflow run page](https://github.com/salom600/osbeta/actions/runs/${{ github.run_id }}) instead (CI artifact, 30-day retention)." >> /tmp/release-notes.md
           fi
           cat >> /tmp/release-notes.md <<EOF
-          - \`nexora-${{ steps.ver.outputs.version }}-x86_64.iso.sha256sum\` — checksum
-          - \`build.log\` — full archiso build log
+          - \`nexora-${{ steps.ver.outputs.version }}-amd64.iso.sha256sum\` — checksum
+          - \`build.log\` — full live-build log
 
           ## How to use
           1. Flash the ISO to a USB stick:
              \`\`\`bash
-             sudo dd if=nexora-${{ steps.ver.outputs.version }}-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+             sudo dd if=nexora-${{ steps.ver.outputs.version }}-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
              \`\`\`
              Or use [balenaEtcher](https://etcher.balena.io/) / [Ventoy](https://www.ventoy.net).
           2. Boot from the USB stick (BIOS or UEFI).
@@ -196,15 +219,16 @@ jobs:
 
           ## What's preinstalled
           - NexoraDE (Openbox + Python/GTK3 panel, launcher, settings)
-          - Firefox, PCManFM, LXTerminal, Mousepad
+          - Firefox ESR, PCManFM, LXTerminal, Mousepad
           - VLC, mpv, GIMP
           - PipeWire audio, NetworkManager, Bluetooth
-          - Full driver coverage (Intel/AMD/NVIDIA 2009+)
-          - Nexora Store — install more apps from official repos + AUR
+          - Full driver coverage (Intel/AMD/NVIDIA 2009+, VirtualBox/QEMU/VMware guest additions)
+          - Nexora Store — install more apps from Debian repos
+          - Custom Nexora kernel (Linux ${{ steps.ver.outputs.version }}-nexora1) when available
           EOF
           echo "path=/tmp/release-notes.md" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release (with checksum + log)
+      - name: Create GitHub release
         if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.make_release == true }}
         uses: softprops/action-gh-release@v2
         with:
@@ -229,7 +253,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ---- 7. On failure: open an issue so the auto-fix workflow can pick it up ----
   report-failure:
     name: Open issue on failure
     needs: build
@@ -253,7 +276,7 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          # Create labels if they don't exist (idempotent)
+          # Create labels if they don't exist
           for spec in "build-failure,d73a4a" "auto-fix,fbca04" "automated,bfdadc"; do
             name="${spec%%,*}"
             color="${spec##*,}"
@@ -280,9 +303,8 @@ jobs:
           [Re-run failed jobs](${RUN_URL})
           EOF
           )
-          # gh issue create accepts ONE label per --label flag
           ISSUE_URL=$(gh issue create \
-            --title "🚧 Build failure on \`${COMMIT_SHA::7}\`" \
+            --title "🚧 ISO Build failure on \`${COMMIT_SHA::7}\`" \
             --body "$BODY" \
             --label "build-failure" \
             --label "auto-fix" \
@@ -290,8 +312,7 @@ jobs:
             --assignee salom600)
           ISSUE_NUM="${ISSUE_URL##*/}"
 
-          # Manually trigger the auto-fix workflow (GitHub Actions doesn't fire
-          # `issues` events for actions taken by GITHUB_TOKEN).
+          # Trigger the auto-fix workflow
           echo "==> Triggering auto-fix workflow for issue #$ISSUE_NUM"
           gh workflow run "Auto-fix Build Failures" \
             --ref "${{ github.ref_name }}" \

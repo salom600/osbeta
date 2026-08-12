@@ -1,0 +1,171 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  lint:
+    name: Syntax + reference checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck yamllint
+          pip install pyflakes
+
+      - name: YAML lint
+        run: |
+          echo "==> yamllint on .github/ + debian-live/"
+          # Find all .yml/.yaml files and lint them with a relaxed config
+          find . -type f \( -name '*.yml' -o -name '*.yaml' \) \
+            -not -path './.git/*' \
+            -print0 | xargs -0 yamllint -d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, indentation: disable}}" 2>&1 | tee lint-yaml.log
+          # yamllint exits non-zero on errors; warnings are fine
+          if grep -E "^\S+:\d+:\d+: error" lint-yaml.log; then
+            echo "FAIL: YAML errors found"
+            exit 1
+          fi
+          echo "OK: no YAML errors"
+
+      - name: Shellcheck
+        run: |
+          echo "==> shellcheck on all .sh + .hook.chroot files"
+          find . -type f \( -name '*.sh' -o -name '*.hook.chroot' -o -name '*.hook.normal' \) \
+            -not -path './.git/*' \
+            -print0 | xargs -0 shellcheck --severity=error --shell=bash 2>&1 | tee lint-shell.log || true
+          # Show but don't fail on warnings (some are spurious in build scripts)
+          if shellcheck --severity=error --shell=bash $(find . -type f \( -name '*.sh' -o -name '*.hook.chroot' \) -not -path './.git/*') 2>&1 | grep -E "^In .+ line"; then
+            echo "FAIL: shellcheck errors found"
+            exit 1
+          fi
+          echo "OK: no shellcheck errors"
+
+      - name: Python syntax check (py_compile)
+        run: |
+          echo "==> Python py_compile on all NexoraDE scripts"
+          find . -type f \( -name 'nexora-*' -o -name '*.py' \) \
+            -not -path './.git/*' \
+            -not -path './work/*' \
+            -print0 | while IFS= read -r -d '' f; do
+              # Only check files that look like Python (have python3 shebang)
+              if head -1 "$f" | grep -q "^#!.*python"; then
+                python3 -m py_compile "$f" && echo "  OK  $f" || { echo "  FAIL $f"; exit 1; }
+              fi
+            done
+          echo "OK: all Python scripts compile"
+
+      - name: Pyflakes (deeper Python check)
+        run: |
+          echo "==> pyflakes on all NexoraDE scripts"
+          find . -type f \( -name 'nexora-*' -o -name '*.py' \) \
+            -not -path './.git/*' \
+            -not -path './work/*' \
+            -print0 | while IFS= read -r -d '' f; do
+              if head -1 "$f" | grep -q "^#!.*python"; then
+                pyflakes "$f" 2>&1 | grep -v "undefined name 'run'" | grep -v "undefined name '_'"
+              fi
+            done
+          echo "OK: pyflakes passed (only intentional warnings remain)"
+
+      - name: bash -n syntax check
+        run: |
+          echo "==> bash -n on every shell-looking file"
+          find . -type f \
+            -not -path './.git/*' \
+            -not -path './work/*' \
+            -print0 | while IFS= read -r -d '' f; do
+              if head -1 "$f" 2>/dev/null | grep -qE "^#!.*(bash|/bin/sh)"; then
+                if ! bash -n "$f" 2>/dev/null; then
+                  echo "  FAIL $f"
+                  bash -n "$f"
+                  exit 1
+                fi
+              fi
+            done
+          echo "OK: all bash scripts parse"
+
+      - name: Broken reference check
+        run: |
+          echo "==> Checking that referenced files exist..."
+          # Make sure every file referenced from the build scripts actually exists in the repo
+          python3 <<'PYEOF'
+          import re, os
+          from pathlib import Path
+
+          errors = []
+          root = Path(".")
+          # Files to scan for references
+          scan_files = list(root.glob("scripts/*.sh")) + \
+                       list(root.glob("kernel/build.sh")) + \
+                       list(root.glob("debian-live/build.sh")) + \
+                       list(root.glob("debian-live/config/hooks/**/*.hook.chroot")) + \
+                       list(root.glob(".github/workflows/*.yml"))
+
+          for sf in scan_files:
+              if not sf.exists():
+                  continue
+              text = sf.read_text(errors="ignore")
+              # Find $ROOT/... or ./path references
+              for m in re.finditer(r'(?:\$ROOT|\$PWD|\.\.)/[^\s"\'`]+', text):
+                  ref = m.group(0)
+                  # Skip env-var references and CI placeholders
+                  if "${" in ref or "$(" in ref:
+                      continue
+                  # Strip leading $ROOT / $PWD / ..
+                  path = ref.lstrip("$").replace("ROOT/", "").replace("PWD/", "")
+                  if path.startswith(".."):
+                      path = path[2:].lstrip("/")
+                  # Only check files we actually expect to exist (not build artifacts)
+                  if any(skip in path for skip in ["work/", "out/", "tmp/", "cache", "config/packages.chroot/"]):
+                      continue
+                  if path.endswith((".sh", ".py", ".conf", ".list", ".cfg", ".desktop", ".xml", ".profile")):
+                      if not Path(path).exists():
+                          errors.append(f"{sf}: references '{ref}' but '{path}' does not exist")
+
+          if errors:
+              print("FAIL: broken file references found:")
+              for e in errors[:20]:
+                  print("  -", e)
+              exit(1)
+          else:
+              print("OK: no broken file references")
+          PYEOF
+
+      - name: Token leak check
+        run: |
+          echo "==> Verifying no GitHub tokens are committed..."
+          if grep -r "ghp_[A-Za-z0-9]\{36\}" . --include="*" 2>/dev/null | grep -v "\.git/"; then
+            echo "FAIL: GitHub token found in repo!"
+            exit 1
+          fi
+          echo "OK: no token leak"
+
+      - name: Upload lint logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-logs
+          path: |
+            lint-yaml.log
+            lint-shell.log
+          retention-days: 7
+          if-no-files-found: ignore

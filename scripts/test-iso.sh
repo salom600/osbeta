@@ -34,11 +34,16 @@ case "$MODE" in
       -display gtk
     ;;
   uefi)
+    if [ ! -f /usr/share/OVMF/OVMF_CODE.fd ]; then
+      echo "UEFI boot requires OVMF. Install with: sudo apt install ovmf"
+      exit 1
+    fi
+    cp /usr/share/OVMF/OVMF_VARS.fd /tmp/OVMF_VARS.fd 2>/dev/null || true
     qemu-system-x86_64 \
       -enable-kvm \
       -m "$RAM" \
       -smp "$CPUS" \
-      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd \
+      -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
       -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
       -cdrom "$ISO" \
       -boot d \

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=NexoraDE
+Comment=NexoraOS Lightweight Desktop Environment
+Exec=/usr/local/bin/nexora-session
+TryExec=/usr/local/bin/nexora-session
+Type=Application
+X-LightDM-SessionName=nexora
+XDG_SESSION_TYPE=x11
+XDG_SESSION_DESKTOP=nexora
+XDG_CURRENT_DESKTOP=Nexora

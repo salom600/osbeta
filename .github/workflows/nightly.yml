@@ -11,11 +11,26 @@ permissions:
   actions: write
 
 jobs:
-  trigger:
-    name: Trigger build
+  trigger-kernel:
+    name: Trigger kernel build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Trigger Build custom kernel workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run "Build custom kernel" \
+            --ref "${{ github.ref_name }}"
+
+  trigger-iso:
+    name: Trigger ISO build (after kernel)
+    needs: trigger-kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait 60s for kernel workflow to register
+        run: sleep 60
       - name: Trigger Build NexoraOS ISO workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -23,11 +38,12 @@ jobs:
           gh workflow run "Build NexoraOS ISO" \
             --ref "${{ github.ref_name }}" \
             -f version_tag="nightly-$(date +%Y%m%d)" \
-            -f make_release=false
-
-      - name: Wait 30s and capture run URL
+            -f make_release=false \
+            -f use_custom_kernel=true
+      - name: Capture run URL
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sleep 30
-          gh run list --workflow="Build NexoraOS ISO" --limit=1 --json databaseId,url --jq '.[0] | "Run URL: \(.url)"'
+          echo "Latest ISO run:"
+          gh run list --workflow="Build NexoraOS ISO" --limit=1 --json databaseId,url --jq '.[0] | "  \(.url)"'
