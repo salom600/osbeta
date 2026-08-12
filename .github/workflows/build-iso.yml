@@ -232,10 +232,18 @@ jobs:
           EOF
           )
           # gh issue create accepts ONE label per --label flag
-          gh issue create \
+          ISSUE_URL=$(gh issue create \
             --title "🚧 Build failure on \`${COMMIT_SHA::7}\`" \
             --body "$BODY" \
             --label "build-failure" \
             --label "auto-fix" \
             --label "automated" \
-            --assignee salom600
+            --assignee salom600)
+          ISSUE_NUM="${ISSUE_URL##*/}"
+
+          # Manually trigger the auto-fix workflow (GitHub Actions doesn't fire
+          # `issues` events for actions taken by GITHUB_TOKEN).
+          echo "==> Triggering auto-fix workflow for issue #$ISSUE_NUM"
+          gh workflow run "Auto-fix Build Failures" \
+            --ref "${{ github.ref_name }}" \
+            -f issue_number="$ISSUE_NUM" || true
