@@ -104,7 +104,9 @@ ntfs-3g
 f2fs-tools
 xfsprogs
 udisks2
-policykit-1-gnome
+policykit-1
+polkitd
+libpolkit-gobject-1-0
 
 ## ---- networking ----
 network-manager
@@ -122,7 +124,7 @@ curl
 rsync
 avahi-daemon
 avahi-utils
-nss-mdns
+libnss-mdns
 nftables
 iptables
 openvpn
@@ -151,7 +153,7 @@ pulseaudio-utils
 alsa-utils
 alsa-tools
 alsa-tools-gui
-sof-firmware
+firmware-sof-signed
 
 ## ---- X11 + Wayland ----
 xorg
@@ -179,8 +181,6 @@ xfonts-75dpi
 xfonts-utils
 xauth
 xserver-xorg-legacy
-wayland
-weston
 libwayland-server0
 libwayland-client0
 xwayland
