@@ -51,6 +51,8 @@ fi
 
 # ---- 3. Configure live-build ----
 echo "==> Configuring live-build..."
+# Note: --squashfs-comp was removed in newer live-build; the --compression flag
+# handles chroot compression. Squashfs compression is configured separately.
 lb config \
     --distribution trixie \
     --architecture amd64 \
@@ -64,12 +66,14 @@ lb config \
     --debian-installer live \
     --debian-installer-gui true \
     --chroot-filesystem squashfs \
-    --squashfs-comp zstd \
     --compression zstd \
     --memtest none \
     --updates true \
     --security true \
     --backports false
+
+# Configure squashfs compression (live-build reads this from a separate file)
+echo "zstd" > config/squashfs-compression
 
 # ---- 4. Build the ISO ----
 echo "==> Building ISO (this takes ~10-20 min)..."
