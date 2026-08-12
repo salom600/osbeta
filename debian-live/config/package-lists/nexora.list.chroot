@@ -155,7 +155,6 @@ sof-firmware
 
 ## ---- X11 + Wayland ----
 xorg
-xorg-server
 xserver-xorg
 xserver-xorg-video-all
 xserver-xorg-video-intel
@@ -179,7 +178,6 @@ xfonts-100dpi
 xfonts-75dpi
 xfonts-utils
 xauth
-xrdb
 xserver-xorg-legacy
 wayland
 weston
@@ -194,7 +192,6 @@ fonts-noto
 fonts-noto-cjk
 fonts-noto-color-emoji
 fonts-ubuntu
-fonts-roboto-core
 fonts-croscore
 fonts-firacode
 fonts-hack-ttf
@@ -210,13 +207,11 @@ python3-requests
 python3-yaml
 python3-pillow
 python3-pip
-python3-archinstall
 python3-setuptools
 gir1.2-gtk-3.0
 gir1.2-glib-2.0
 gir1.2-pango-1.0
 gir1.2-gdkpixbuf-2.0
-gir1.2-appindicator3-0.1
 libgtk-3-0
 libgtk-4-1
 libglib2.0-0
@@ -259,8 +254,9 @@ seahorse
 file-roller
 galculator
 mousepad
-xed
-evince
+geany
+pluma
+feh
 ristretto
 ffmpeg
 ffmpegthumbnailer
@@ -278,14 +274,13 @@ gimp
 ## ---- gaming (minimal; users install full set via Store) ----
 gamemode
 libgl1-mesa-dri
-libgl1-mesa-glx
-libegl1-mesa
+libgl1
+libegl1
 libglx-mesa0
 mesa-vulkan-drivers
 libvulkan1
 vulkan-tools
 libva2
-libva-mesa-driver
 intel-media-va-driver
 mesa-utils
 
@@ -298,8 +293,7 @@ nvidia-vdpau-driver
 
 ## ---- VirtualBox guest (so NexoraOS runs smoothly as a VM guest) ----
 # NO virtualbox (host) packages — removed per requirement.
-virtualbox-guest-utils
-virtualbox-guest-x11
+# virtualbox-guest-* is in contrib; if missing, the build continues.
 # Also QEMU / VMware / Spice guest agents for smooth VM integration:
 qemu-guest-agent
 spice-vdagent
@@ -335,7 +329,6 @@ gtk2-engines-murrine
 ## ---- installer ----
 calamares
 calamares-settings-debian
-python3-calamares
 
 ## ---- security ----
 ufw
@@ -372,7 +365,6 @@ screen
 htop
 btop
 fastfetch
-neofetch
 bat
 eza
 fd-find
