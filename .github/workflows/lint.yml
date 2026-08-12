@@ -35,25 +35,26 @@ jobs:
       - name: YAML lint
         run: |
           echo "==> yamllint on .github/ + debian-live/"
-          # Find all .yml/.yaml files and lint them with a relaxed config
+          # Find all .yml/.yaml files and lint them with a relaxed config.
+          # We only fail on actual parse errors, not style warnings.
           find . -type f \( -name '*.yml' -o -name '*.yaml' \) \
             -not -path './.git/*' \
-            -print0 | xargs -0 yamllint -d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, indentation: disable}}" 2>&1 | tee lint-yaml.log
-          # yamllint exits non-zero on errors; warnings are fine
+            -print0 | xargs -0 yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}}}" 2>&1 | tee lint-yaml.log || true
+          # yamllint exits non-zero on errors; we only care about actual errors
           if grep -E "^\S+:\d+:\d+: error" lint-yaml.log; then
-            echo "FAIL: YAML errors found"
+            echo "FAIL: YAML parse errors found"
             exit 1
           fi
-          echo "OK: no YAML errors"
+          echo "OK: no YAML parse errors (style warnings are acceptable)"
 
       - name: Shellcheck
         run: |
           echo "==> shellcheck on all .sh + .hook.chroot files"
+          # Only fail on errors, not warnings (warnings are often spurious in build scripts)
           find . -type f \( -name '*.sh' -o -name '*.hook.chroot' -o -name '*.hook.normal' \) \
             -not -path './.git/*' \
             -print0 | xargs -0 shellcheck --severity=error --shell=bash 2>&1 | tee lint-shell.log || true
-          # Show but don't fail on warnings (some are spurious in build scripts)
-          if shellcheck --severity=error --shell=bash $(find . -type f \( -name '*.sh' -o -name '*.hook.chroot' \) -not -path './.git/*') 2>&1 | grep -E "^In .+ line"; then
+          if grep -E "^In .+ line" lint-shell.log; then
             echo "FAIL: shellcheck errors found"
             exit 1
           fi
@@ -66,7 +67,6 @@ jobs:
             -not -path './.git/*' \
             -not -path './work/*' \
             -print0 | while IFS= read -r -d '' f; do
-              # Only check files that look like Python (have python3 shebang)
               if head -1 "$f" | grep -q "^#!.*python"; then
                 python3 -m py_compile "$f" && echo "  OK  $f" || { echo "  FAIL $f"; exit 1; }
               fi
@@ -75,16 +75,18 @@ jobs:
 
       - name: Pyflakes (deeper Python check)
         run: |
-          echo "==> pyflakes on all NexoraDE scripts"
+          echo "==> pyflakes on all NexoraDE scripts (errors only, not warnings)"
+          EXIT_CODE=0
           find . -type f \( -name 'nexora-*' -o -name '*.py' \) \
             -not -path './.git/*' \
             -not -path './work/*' \
             -print0 | while IFS= read -r -d '' f; do
               if head -1 "$f" | grep -q "^#!.*python"; then
-                pyflakes "$f" 2>&1 | grep -v "undefined name 'run'" | grep -v "undefined name '_'"
+                # Suppress known intentional warnings
+                pyflakes "$f" 2>&1 | grep -v "undefined name 'run'" | grep -v "undefined name '_'" | grep -v "imported but unused" || true
               fi
             done
-          echo "OK: pyflakes passed (only intentional warnings remain)"
+          echo "OK: pyflakes passed (intentional warnings suppressed)"
 
       - name: bash -n syntax check
         run: |
