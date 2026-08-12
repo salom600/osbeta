@@ -33,6 +33,9 @@ syslinux
 grub
 efibootmgr
 mtools
+memtest86+
+memtest86+-efi
+edk2-shell
 
 ## ---- initramfs / live tooling ----
 mkinitcpio
