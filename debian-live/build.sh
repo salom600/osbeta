@@ -51,8 +51,9 @@ fi
 
 # ---- 3. Configure live-build ----
 echo "==> Configuring live-build..."
-# Note: --squashfs-comp was removed in newer live-build; the --compression flag
-# handles chroot compression. Squashfs compression is configured separately.
+# Note: live-build's --compression flag only accepts: gzip, bzip2, lzma, lzo, xz.
+# It controls tarball compression, NOT squashfs compression. For squashfs we
+# write to config/squashfs-compression below.
 lb config \
     --distribution trixie \
     --architecture amd64 \
@@ -66,13 +67,13 @@ lb config \
     --debian-installer live \
     --debian-installer-gui true \
     --chroot-filesystem squashfs \
-    --compression zstd \
     --memtest none \
     --updates true \
     --security true \
     --backports false
 
-# Configure squashfs compression (live-build reads this from a separate file)
+# Configure squashfs compression (zstd = best speed+size)
+mkdir -p config
 echo "zstd" > config/squashfs-compression
 
 # ---- 4. Build the ISO ----
