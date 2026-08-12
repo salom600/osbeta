@@ -1,15 +1,11 @@
 #
 # NexoraOS — package list for the live ISO (x86_64)
 # -----------------------------------------------
-# Every package here will be installed into the live root via pacman.
 # ONLY official repo packages (core/extra/multilib) belong here.
-# AUR-only packages are installable post-boot via Nexora Store (yay).
+# AUR-only packages (calamares, yay, neofetch, arc-gtk-theme, etc.) are
+# installable post-boot via Nexora Store or our bundled AUR helper.
 #
-# Design rules:
-#   - Keep total install under ~2.6 GB so the ISO stays <2 GB after squashfs.
-#   - Default to lightweight components so RAM usage at idle stays <300 MB.
-#   - Modern 2026 stack: Linux 6.x kernel, pipewire, wayland-ready (X11 default).
-#   - Hardware coverage: 2009+ GPUs via mesa + xf86-video-* fallbacks.
+# This list has been verified against the Arch repo state as of 2026-08.
 #
 
 ## ---- base system ----
@@ -61,7 +57,6 @@ mobile-broadband-provider-info
 network-manager-applet
 nm-connection-editor
 openssh
-openssh-server
 wget
 curl
 rsync
@@ -75,7 +70,6 @@ nftables
 openvpn
 wireguard-tools
 dnsmasq
-sipcalc
 traceroute
 mtr
 nmap
@@ -83,14 +77,13 @@ bind
 whois
 inetutils
 
-## ---- audio / video stack (modern pipewire) ----
+## ---- audio (modern pipewire) ----
 pipewire
 pipewire-pulse
 pipewire-alsa
 pipewire-jack
 pipewire-audio
 wireplumber
-pulseaudio-bluetooth
 sof-firmware
 alsa-firmware
 alsa-utils
@@ -114,7 +107,6 @@ xorg-fonts-100dpi
 xorg-fonts-75dpi
 xorg-fonts-misc
 xorg-fonts-encodings
-xorg-fonts-alias
 ttf-dejavu
 ttf-liberation
 noto-fonts
@@ -125,18 +117,21 @@ freetype2
 fontconfig
 wayland
 wayland-protocols
-xwayland
+xorg-xwayland
 labwc
-wlroots
 
 ## ---- window manager (NexoraDE foundation) ----
 openbox
-obconf
 python
 python-gobject
 python-dbus
 python-cairo
 python-pip
+python-psutil
+python-requests
+python-yaml
+python-pillow
+python-archinstall
 gtk3
 gtk4
 glib2
@@ -147,10 +142,6 @@ librsvg
 libnotify
 notification-daemon
 dunst
-python-psutil
-python-requests
-python-yaml
-python-pillow
 
 ## ---- display manager ----
 lightdm
@@ -158,7 +149,7 @@ lightdm-gtk-greeter
 accountsservice
 
 ## ---- desktop utilities (lightweight) ----
-pcmanfm-gtk3
+pcmanfm
 lxappearance
 lxinput
 lxsession
@@ -170,7 +161,6 @@ xcompmgr
 picom
 arandr
 volumeicon
-nm-applet
 gnome-keyring
 libsecret
 seahorse
@@ -190,12 +180,9 @@ poppler-glib
 firefox
 firefox-i18n-en-us
 transmission-gtk
-hexchat
-pidgin
 
 ## ---- office / media ----
 libreoffice-fresh
-libreoffice-fresh-en-gb
 vlc
 mpv
 audacity
@@ -226,20 +213,15 @@ lib32-nvidia-utils
 nvidia-settings
 libva
 libva-mesa-driver
-libva-vdpau-driver
 intel-media-driver
-mesa-vdpau
 
 ## ---- virtualization ----
 virtualbox
-virtualbox-host-modules-arch
+virtualbox-host-dkms
 virtualbox-guest-iso
-qemu
-qemu-arch-extra
+qemu-desktop
 libvirt
 virt-manager
-dnsmasq
-bridge-utils
 ebtables
 openbsd-netcat
 spice-vdagent
@@ -275,7 +257,6 @@ nvme-cli
 ## ---- power / laptop ----
 upower
 powertop
-lxsession
 
 ## ---- fonts / i18n ----
 ttf-ubuntu-font-family
@@ -288,20 +269,14 @@ ttf-hack
 ttf-nerd-fonts-symbols
 
 ## ---- themes / icons ----
-arc-gtk-theme
-arc-icon-theme
 papirus-icon-theme
 breeze-gtk
 breeze-icons
 hicolor-icon-theme
 adwaita-icon-theme
 gnome-themes-extra
-gtk-engine-murrine
-gtk-engines
 
 ## ---- installer + tools ----
-calamares
-calamares-extensions
 qt5-svg
 qt5ct
 polkit
@@ -313,14 +288,12 @@ gvfs-afc
 gvfs-gphoto2
 gvfs-goa
 gvfs-nfs
-policykit
 
 ## ---- security / system ----
 ufw
 gufw
 firejail
 apparmor
-apparmor-utils
 openssh
 fail2ban
 keepassxc
@@ -362,12 +335,11 @@ luarocks
 php
 composer
 
-## ---- text editors / IDEs ----
+## ---- text editors ----
 vim
 neovim
 nano
 emacs
-code
 micro
 
 ## ---- shell extras ----
@@ -382,7 +354,6 @@ tmux
 screen
 htop
 btop
-neofetch
 fastfetch
 bat
 eza
@@ -400,10 +371,6 @@ xz
 gzip
 bzip2
 tar
-ccze
-
-## ---- AUR helper (needed for Nexora Store) — yay is in extra since 2025 ----
-yay
 
 ## ---- documentation ----
 man-db

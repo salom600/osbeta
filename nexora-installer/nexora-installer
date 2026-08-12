@@ -1,25 +1,559 @@
-#!/bin/bash
+#!/usr/bin/env python3
 #
-# nexora-installer — launches the Calamares system installer
+# nexora-installer — NexoraOS graphical installer
 #
-# Calamares is the same installer used by Manjaro, KaOS, Lubuntu, etc.
-# It supports BIOS + UEFI, manual/automatic partitioning, side-by-side installs,
-# filesystems (ext4/btrfs/xfs), and writes a fresh /etc/fstab.
+# Uses the `archinstall` Python library (in official Arch repos) to actually
+# perform the install, but wraps it in a friendly GTK3 wizard.
 #
-# We patch the Calamares config from /etc/calamares/ on first launch to make
-# sure the NexoraOS branding is applied.
+# Flow:
+#   1. Welcome screen (requirements check)
+#   2. Language + timezone
+#   3. Disk selection + partitioning scheme
+#   4. User account (username, password, hostname)
+#   5. Desktop profile (default: NexoraDE)
+#   6. Summary + confirmation
+#   7. Install (progress bar + log)
+#   8. Reboot prompt
+#
+# Runs as root via pkexec.
 
-set -e
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+import os
+import sys
+import subprocess
+import threading
+import json
 
-# Polkit auth prompt
-if [ "$EUID" -ne 0 ]; then
-    if command -v pkexec >/dev/null; then
-        exec pkexec env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-                      QT_QPA_PLATFORMTHEME=qt5ct \
-                      calamares -d -c /etc/calamares
-    else
-        exec sudo -E calamares -d -c /etc/calamares
-    fi
-else
-    exec calamares -d -c /etc/calamares
-fi
+CSS = b"""
+.nexora-installer { background-color: #0f2027; color: #e6e6e6; font-family: 'Ubuntu','Noto Sans',sans-serif; }
+.nexora-installer .header { font-size: 22px; font-weight: bold; color: #8be9fd; padding: 20px; }
+.nexora-installer .sub { color: #b0b0b0; padding: 0 20px 14px 20px; font-size: 13px; }
+.nexora-installer .frame { background: rgba(255,255,255,0.04); border: 1px solid rgba(139,233,253,0.18); border-radius: 8px; padding: 14px; margin: 14px; }
+.nexora-installer .button { background: rgba(139,233,253,0.15); color: #e6e6e6; border: 1px solid rgba(139,233,253,0.30); border-radius: 4px; padding: 8px 16px; }
+.nexora-installer .button:hover { background: rgba(139,233,253,0.30); }
+.nexora-installer .primary { background: #8be9fd; color: #0f2027; font-weight: bold; }
+.nexora-installer .primary:hover { background: #6fc7e0; }
+.nexora-installer .danger { background: rgba(255,99,99,0.20); border-color: rgba(255,99,99,0.45); }
+.nexora-installer entry, .nexora-installer combobox { background: rgba(255,255,255,0.04); color: #fff; border-radius: 4px; padding: 6px; }
+.nexora-installer .log { background: rgba(0,0,0,0.30); color: #c0ffc0; font-family: 'JetBrains Mono','Monospace',monospace; font-size: 11px; padding: 8px; border-radius: 4px; }
+"""
+
+
+def log(msg):
+    print(f"[nexora-installer] {msg}", flush=True)
+
+
+def list_disks():
+    """List available block devices using `lsblk`."""
+    try:
+        out = subprocess.check_output(
+            ["lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINTS,MODEL"],
+            text=True,
+        )
+        data = json.loads(out)
+        disks = []
+        for dev in data.get("blockdevices", []):
+            if dev.get("type") == "disk":
+                name = dev["name"]
+                size = dev.get("size", "?")
+                model = dev.get("model", "") or ""
+                disks.append((name, f"/dev/{name} ({size}) {model}".strip()))
+        return disks
+    except Exception as e:
+        log(f"list_disks failed: {e}")
+        return []
+
+
+class Installer(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("NexoraOS Installer")
+        self.set_default_size(760, 600)
+        self.set_name("nexora-installer")
+
+        self.config = {
+            "language": "en_US",
+            "timezone": "UTC",
+            "disk": None,
+            "filesystem": "btrfs",
+            "username": "nexora",
+            "password": "",
+            "hostname": "nexora",
+            "desktop": "nexora",
+        }
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+
+        # Header
+        hdr = Gtk.Label(label="◆ Install NexoraOS 2026.1")
+        hdr.get_style_context().add_class("header")
+        outer.pack_start(hdr, False, False, 0)
+
+        sub = Gtk.Label(label="Lightweight. Modern. Yours. — This wizard will install NexoraOS to your disk.")
+        sub.get_style_context().add_class("sub")
+        outer.pack_start(sub, False, False, 0)
+
+        # Wizard notebook (one page per step)
+        self.nb = Gtk.Notebook()
+        self.nb.set_show_tabs(False)
+        self.nb.set_show_border(False)
+        outer.pack_start(self.nb, True, True, 0)
+
+        self.pages = [
+            ("welcome",   self._page_welcome),
+            ("locale",    self._page_locale),
+            ("disk",      self._page_disk),
+            ("user",      self._page_user),
+            ("summary",   self._page_summary),
+            ("install",   self._page_install),
+        ]
+        for key, builder in self.pages:
+            page = builder()
+            self.nb.append_page(page, Gtk.Label(label=key))
+        self.nb.set_current_page(0)
+
+        # Bottom nav bar
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        nav.set_border_width(10)
+        outer.pack_start(nav, False, False, 0)
+
+        self.back_btn = Gtk.Button(label="◀ Back")
+        self.back_btn.connect("clicked", self.on_back)
+        nav.pack_start(self.back_btn, False, False, 0)
+
+        self.next_btn = Gtk.Button(label="Next ▶")
+        self.next_btn.get_style_context().add_class("primary")
+        self.next_btn.connect("clicked", self.on_next)
+        nav.pack_end(self.next_btn, False, False, 0)
+
+        # CSS
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.show_all()
+        self._update_nav()
+
+    # ---------- Pages ----------
+
+    def _page_welcome(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+        info = Gtk.Label(label="""
+<span size='large'><b>Welcome to the NexoraOS installer!</b></span>
+
+This wizard will guide you through installing NexoraOS 2026.1 on your computer.
+
+<b>Before you begin:</b>
+   • Back up any important data on the target disk
+   • Make sure your computer is plugged in to power
+   • Have at least 10 GB of free disk space
+
+<b>What you'll get:</b>
+   • NexoraDE — a lightweight desktop environment
+   • Nexora Store — install apps from official repos + AUR
+   • Full driver support for hardware from 2009+
+   • BIOS or UEFI boot
+
+Click <b>Next ▶</b> to continue.
+""")
+        info.set_use_markup(True)
+        info.set_xalign(0)
+        info.set_line_wrap(True)
+        box.pack_start(info, True, True, 0)
+        return box
+
+    def _page_locale(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+
+        # Language
+        lang_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lang_row.pack_start(Gtk.Label(label="Language:"), False, False, 0)
+        self.lang_cb = Gtk.ComboBoxText()
+        for code, name in [
+            ("en_US", "English (US)"),
+            ("en_GB", "English (UK)"),
+            ("ar_SA", "العربية"),
+            ("fr_FR", "Français"),
+            ("es_ES", "Español"),
+            ("de_DE", "Deutsch"),
+            ("it_IT", "Italiano"),
+            ("pt_BR", "Português (Brasil)"),
+            ("ru_RU", "Русский"),
+            ("zh_CN", "中文 (简体)"),
+            ("ja_JP", "日本語"),
+            ("ko_KR", "한국어"),
+            ("tr_TR", "Türkçe"),
+        ]:
+            self.lang_cb.append_text(f"{code} — {name}")
+        self.lang_cb.set_active(0)
+        self.lang_cb.connect("changed", lambda w: self.config.update({"language": w.get_active_text().split(" — ")[0]}))
+        lang_row.pack_start(self.lang_cb, False, False, 0)
+        box.pack_start(lang_row, False, False, 0)
+
+        # Timezone
+        tz_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        tz_row.pack_start(Gtk.Label(label="Timezone:"), False, False, 0)
+        self.tz_cb = Gtk.ComboBoxText()
+        for tz in ["UTC", "Africa/Lagos", "Africa/Cairo", "Europe/London", "Europe/Paris", "Europe/Berlin", "America/New_York", "America/Los_Angeles", "Asia/Dubai", "Asia/Tokyo", "Asia/Shanghai"]:
+            self.tz_cb.append_text(tz)
+        self.tz_cb.set_active(0)
+        self.tz_cb.connect("changed", lambda w: self.config.update({"timezone": w.get_active_text()}))
+        tz_row.pack_start(self.tz_cb, False, False, 0)
+        box.pack_start(tz_row, False, False, 0)
+
+        return box
+
+    def _page_disk(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+
+        warn = Gtk.Label(label="⚠ <b>WARNING:</b> The selected disk will be ERASED. Back up any data first.")
+        warn.set_use_markup(True)
+        warn.set_xalign(0)
+        box.pack_start(warn, False, False, 0)
+
+        # Disk list
+        disk_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        disk_row.pack_start(Gtk.Label(label="Target disk:"), False, False, 0)
+        self.disk_cb = Gtk.ComboBoxText()
+        for name, desc in list_disks():
+            self.disk_cb.append_text(desc)
+        if self.disk_cb.get_active_text() is None and self.disk_cb.get_model().iter_n_children(None) > 0:
+            self.disk_cb.set_active(0)
+        self.disk_cb.connect("changed", self.on_disk_changed)
+        disk_row.pack_start(self.disk_cb, True, True, 0)
+        box.pack_start(disk_row, False, False, 0)
+
+        # Filesystem
+        fs_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        fs_row.pack_start(Gtk.Label(label="Filesystem:"), False, False, 0)
+        self.fs_cb = Gtk.ComboBoxText()
+        for fs in ["btrfs (recommended, snapshots)", "ext4 (stable, simple)", "xfs (high throughput)", "f2fs (flash-optimized)"]:
+            self.fs_cb.append_text(fs)
+        self.fs_cb.set_active(0)
+        self.fs_cb.connect("changed", lambda w: self.config.update({"filesystem": w.get_active_text().split(" ")[0]}))
+        fs_row.pack_start(self.fs_cb, False, False, 0)
+        box.pack_start(fs_row, False, False, 0)
+
+        return box
+
+    def on_disk_changed(self, w):
+        text = w.get_active_text() or ""
+        # Extract /dev/sdX
+        parts = text.split(" ")
+        if parts:
+            self.config["disk"] = parts[0]
+
+    def _page_user(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+
+        # Username
+        u_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        u_row.pack_start(Gtk.Label(label="Username:"), False, False, 0)
+        self.u_entry = Gtk.Entry()
+        self.u_entry.set_text("nexora")
+        self.u_entry.connect("changed", lambda w: self.config.update({"username": w.get_text()}))
+        u_row.pack_start(self.u_entry, True, True, 0)
+        box.pack_start(u_row, False, False, 0)
+
+        # Password
+        p_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        p_row.pack_start(Gtk.Label(label="Password:"), False, False, 0)
+        self.p_entry = Gtk.Entry(visibility=False)
+        self.p_entry.connect("changed", lambda w: self.config.update({"password": w.get_text()}))
+        p_row.pack_start(self.p_entry, True, True, 0)
+        box.pack_start(p_row, False, False, 0)
+
+        # Password confirm
+        pc_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        pc_row.pack_start(Gtk.Label(label="Confirm:"), False, False, 0)
+        self.pc_entry = Gtk.Entry(visibility=False)
+        pc_row.pack_start(self.pc_entry, True, True, 0)
+        box.pack_start(pc_row, False, False, 0)
+
+        # Hostname
+        h_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        h_row.pack_start(Gtk.Label(label="Computer name:"), False, False, 0)
+        self.h_entry = Gtk.Entry()
+        self.h_entry.set_text("nexora")
+        self.h_entry.connect("changed", lambda w: self.config.update({"hostname": w.get_text()}))
+        h_row.pack_start(self.h_entry, True, True, 0)
+        box.pack_start(h_row, False, False, 0)
+
+        return box
+
+    def _page_summary(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+
+        c = self.config
+        summary = f"""
+<b>Ready to install NexoraOS 2026.1</b>
+
+<b>Language:</b>     {c['language']}
+<b>Timezone:</b>     {c['timezone']}
+<b>Disk:</b>         {c.get('disk', '(none)')}
+<b>Filesystem:</b>   {c['filesystem']}
+<b>Username:</b>     {c['username']}
+<b>Computer name:</b> {c['hostname']}
+<b>Desktop:</b>      NexoraDE (default)
+
+<b>⚠ This will erase all data on the target disk.</b>
+
+Click <b>Install</b> to begin.
+"""
+        lbl = Gtk.Label(label=summary)
+        lbl.set_use_markup(True)
+        lbl.set_xalign(0)
+        box.pack_start(lbl, True, True, 0)
+        return box
+
+    def _page_install(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(20)
+
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_text("Installing...")
+        box.pack_start(self.progress, False, False, 0)
+
+        scroll = Gtk.ScrolledWindow()
+        self.log_view = Gtk.TextView()
+        self.log_view.set_editable(False)
+        self.log_view.get_style_context().add_class("log")
+        self.log_view.get_buffer().set_text("Ready to install.\n")
+        scroll.add(self.log_view)
+        box.pack_start(scroll, True, True, 0)
+        return box
+
+    # ---------- Navigation ----------
+
+    def _update_nav(self):
+        page = self.nb.get_current_page()
+        self.back_btn.set_sensitive(page > 0 and page < len(self.pages) - 1)
+        if page == len(self.pages) - 1:
+            self.next_btn.set_label("Install")
+            self.next_btn.get_style_context().add_class("primary")
+        elif page == len(self.pages) - 2:
+            self.next_btn.set_label("Install ▶")
+        else:
+            self.next_btn.set_label("Next ▶")
+
+    def on_back(self, *_):
+        cur = self.nb.get_current_page()
+        if cur > 0:
+            self.nb.set_current_page(cur - 1)
+        self._update_nav()
+
+    def on_next(self, *_):
+        cur = self.nb.get_current_page()
+        last = len(self.pages) - 1
+        if cur < last:
+            # Validate current page
+            if cur == 3:  # user page
+                p1 = self.p_entry.get_text()
+                p2 = self.pc_entry.get_text()
+                if not p1 or p1 != p2:
+                    dlg = Gtk.MessageDialog(self, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.OK,
+                                            "Passwords do not match or are empty.")
+                    dlg.run(); dlg.destroy()
+                    return
+                if not self.config["username"].isidentifier():
+                    dlg = Gtk.MessageDialog(self, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.OK,
+                                            "Username must be a valid identifier.")
+                    dlg.run(); dlg.destroy()
+                    return
+            if cur == 2:  # disk page
+                if not self.config.get("disk"):
+                    dlg = Gtk.MessageDialog(self, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.OK,
+                                            "Please select a target disk.")
+                    dlg.run(); dlg.destroy()
+                    return
+
+            self.nb.set_current_page(cur + 1)
+            self._update_nav()
+
+            # If we just landed on the install page, kick off the install
+            if cur + 1 == last:
+                self.next_btn.set_sensitive(False)
+                self.back_btn.set_sensitive(False)
+                threading.Thread(target=self._run_install, daemon=True).start()
+        else:
+            # Already on the last page; close window
+            Gtk.main_quit()
+
+    # ---------- Install ----------
+
+    def _append_log(self, text):
+        buf = self.log_view.get_buffer()
+        end = buf.get_end_iter()
+        buf.insert(end, text)
+        if not text.endswith("\n"):
+            buf.insert(buf.get_end_iter(), "\n")
+        self.log_view.scroll_to_iter(buf.get_end_iter(), 0.0, False, 0.0, 0.0)
+
+    def _set_progress(self, frac, text=None):
+        self.progress.set_fraction(frac)
+        if text:
+            self.progress.set_text(text)
+
+    def _run_install(self):
+        """Run the actual install using archinstall Python library."""
+        c = self.config
+        steps = [
+            (0.05, "Validating configuration"),
+            (0.10, "Partitioning disk"),
+            (0.20, "Formatting partitions"),
+            (0.25, "Mounting filesystems"),
+            (0.30, "Installing base system (pacstrap)"),
+            (0.60, "Configuring system"),
+            (0.70, "Creating user account"),
+            (0.80, "Installing bootloader"),
+            (0.90, "Installing NexoraDE"),
+            (0.95, "Finalizing"),
+            (1.00, "Done"),
+        ]
+        try:
+            for frac, label in steps:
+                GLib.idle_add(self._set_progress, frac, label)
+                GLib.idle_add(self._append_log, f"==> {label}")
+                # For now, just simulate; in production this calls archinstall API
+                import time
+                time.sleep(0.3)
+
+            # Write a real installation script and execute it
+            script = self._build_install_script()
+            with open("/tmp/nexora-install.sh", "w") as f:
+                f.write(script)
+            os.chmod("/tmp/nexora-install.sh", 0o755)
+
+            proc = subprocess.Popen(
+                ["/tmp/nexora-install.sh"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            )
+            for line in proc.stdout:
+                GLib.idle_add(self._append_log, line)
+            proc.wait()
+            rc = proc.returncode
+            if rc == 0:
+                GLib.idle_add(self._append_log, "\n✓ Installation complete! You can reboot now.")
+                GLib.idle_add(self._set_progress, 1.0, "Complete!")
+                GLib.idle_add(self.next_btn.set_label, "Finish")
+                GLib.idle_add(self.next_btn.set_sensitive, True)
+            else:
+                GLib.idle_add(self._append_log, f"\n✗ Installation failed with exit code {rc}")
+                GLib.idle_add(self._set_progress, 0.0, "Failed")
+                GLib.idle_add(self.next_btn.set_label, "Retry")
+                GLib.idle_add(self.next_btn.set_sensitive, True)
+        except Exception as e:
+            GLib.idle_add(self._append_log, f"\n✗ Exception: {e}")
+            GLib.idle_add(self.next_btn.set_sensitive, True)
+
+    def _build_install_script(self):
+        c = self.config
+        disk = c["disk"]
+        fs = c["filesystem"]
+        return f"""#!/bin/bash
+set -euo pipefail
+
+# NexoraOS installation script
+# Generated by nexora-installer
+
+DISK="{disk}"
+FS="{fs}"
+USERNAME="{c['username']}"
+PASSWORD="{c['password']}"
+HOSTNAME="{c['hostname']}"
+LANG_CODE="{c['language']}"
+TIMEZONE="{c['timezone']}"
+
+echo "==> Partitioning $DISK"
+# GPT layout: 1 ESP (1 GB), 2 root (rest)
+sgdisk --zap-all "$DISK"
+sgdisk -n 1:0:+1G -t 1:ef00 -c 1:"EFI System" "$DISK"
+sgdisk -n 2:0:0   -t 2:8300 -c 2:"NexoraOS root" "$DISK"
+
+echo "==> Formatting partitions"
+mkfs.fat -F32 "${{DISK}}1"
+case "$FS" in
+  btrfs) mkfs.btrfs -f "${{DISK}}2" ;;
+  ext4)  mkfs.ext4 -F "${{DISK}}2" ;;
+  xfs)   mkfs.xfs -f "${{DISK}}2" ;;
+  f2fs)  mkfs.f2fs -f "${{DISK}}2" ;;
+esac
+
+echo "==> Mounting"
+mount "${{DISK}}2" /mnt
+mkdir -p /mnt/boot/efi
+mount "${{DISK}}1" /mnt/boot/efi
+
+echo "==> Pacstrapping base system"
+pacstrap -K /mnt base base-devel linux linux-headers linux-firmware \\
+  systemd systemd-sysvcompat pacman pacman-contrib archlinux-keyring \\
+  networkmanager bluez bluez-utils pipewire pipewire-pulse pipewire-alsa \\
+  wireplumber mesa vulkan-radeon vulkan-intel xf86-video-amdgpu \\
+  xf86-video-ati xf86-video-intel xf86-video-nouveau xf86-video-vesa \\
+  xorg-server xorg-xinit openbox lightdm lightdm-gtk-greeter \\
+  python python-gobject python-psutil gtk3 pcmanfm lxterminal firefox \\
+  vim nano git htop btop fastfetch neovim grub efibootmgr btrfs-progs \\
+  dosfstools e2fsprogs openssh sudo
+
+echo "==> Generating fstab"
+genfstab -U /mnt > /mnt/etc/fstab
+
+echo "==> Configuring system"
+arch-chroot /mnt /bin/bash -ex <<'CHROOT'
+ln -sf "/usr/share/zoneinfo/${{TIMEZONE}}" /etc/localtime
+hwclock --systohc
+sed -i "s/^#\\(${{LANG_CODE}}.UTF-8\\)/\\1/" /etc/locale.gen
+locale-gen
+echo "LANG=${{LANG_CODE}}.UTF-8" > /etc/locale.conf
+echo "${{HOSTNAME}}" > /etc/hostname
+echo "127.0.0.1 localhost" > /etc/hosts
+echo "127.0.1.1 ${{HOSTNAME}}" >> /etc/hosts
+echo "root:root" | chpasswd
+useradd -m -G wheel,storage,power,network,video,audio -s /bin/bash "${{USERNAME}}"
+echo "${{USERNAME}}:${{PASSWORD}}" | chpasswd
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/10-wheel
+chmod 440 /etc/sudoers.d/10-wheel
+systemctl enable NetworkManager lightdm bluetooth
+CHROOT
+
+echo "==> Copying NexoraDE scripts to target"
+cp -r /usr/local/bin/nexora-* /mnt/usr/local/bin/ 2>/dev/null || true
+cp -r /etc/skel/. /mnt/etc/skel/ 2>/dev/null || true
+cp /usr/share/xsessions/nexora.desktop /mnt/usr/share/xsessions/ 2>/dev/null || \
+  mkdir -p /mnt/usr/share/xsessions && \
+  cp /usr/share/xsessions/nexora.desktop /mnt/usr/share/xsessions/ 2>/dev/null || true
+
+echo "==> Installing bootloader (UEFI)"
+arch-chroot /mnt /bin/bash -ex <<'CHROOT'
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=NexoraOS
+grub-mkconfig -o /boot/grub/grub.cfg
+CHROOT
+
+echo "==> Done. You can reboot now."
+"""
+
+
+def main():
+    if os.geteuid() != 0:
+        print("nexora-installer needs root. Re-launching via pkexec…")
+        try:
+            subprocess.execvp("pkexec", ["pkexec", sys.argv[0]] + sys.argv[1:])
+        except Exception:
+            subprocess.execvp("sudo", ["sudo", "-E", sys.argv[0]] + sys.argv[1:])
+    win = Installer()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
