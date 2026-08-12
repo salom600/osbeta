@@ -157,61 +157,75 @@ jobs:
             echo "The ISO will still be available as a CI artifact (10 GB limit)."
           fi
 
-      - name: Create GitHub release
+      - name: Compose release notes
+        id: notes
+        run: |
+          cat > /tmp/release-notes.md <<EOF
+          # NexoraOS ${{ steps.ver.outputs.version }}
+
+          Automated build from commit \`${{ github.sha }}\`.
+
+          **ISO size:** ${{ steps.size.outputs.size_mb }} MB
+
+          ## Download
+          EOF
+          if [ "${{ steps.size.outputs.uploadable }}" = "true" ]; then
+            echo "- \`nexora-${{ steps.ver.outputs.version }}-x86_64.iso\` — bootable hybrid ISO (BIOS + UEFI)" >> /tmp/release-notes.md
+          else
+            echo "- ⚠ **ISO NOT attached** — exceeds GitHub's 2 GiB asset limit." >> /tmp/release-notes.md
+            echo "  Download it from the [Actions workflow run page](https://github.com/salom600/osbeta/actions/runs/${{ github.run_id }}) instead (CI artifact, 30-day retention)." >> /tmp/release-notes.md
+          fi
+          cat >> /tmp/release-notes.md <<EOF
+          - \`nexora-${{ steps.ver.outputs.version }}-x86_64.iso.sha256sum\` — checksum
+          - \`build.log\` — full archiso build log
+
+          ## How to use
+          1. Flash the ISO to a USB stick:
+             \`\`\`bash
+             sudo dd if=nexora-${{ steps.ver.outputs.version }}-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+             \`\`\`
+             Or use [balenaEtcher](https://etcher.balena.io/) / [Ventoy](https://www.ventoy.net).
+          2. Boot from the USB stick (BIOS or UEFI).
+          3. Click **Install NexoraOS** on the desktop to start the installer.
+
+          ## Minimum specs
+          - 1 GB RAM (low-RAM boot) / 2 GB recommended
+          - 10 GB free disk space
+          - x86_64 CPU (Intel/AMD from 2009+)
+          - BIOS or UEFI
+
+          ## What's preinstalled
+          - NexoraDE (Openbox + Python/GTK3 panel, launcher, settings)
+          - Firefox, PCManFM, LXTerminal, Mousepad
+          - VLC, mpv, GIMP
+          - PipeWire audio, NetworkManager, Bluetooth
+          - Full driver coverage (Intel/AMD/NVIDIA 2009+)
+          - Nexora Store — install more apps from official repos + AUR
+          EOF
+          echo "path=/tmp/release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release (with checksum + log)
         if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.make_release == true }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: "NexoraOS ${{ steps.ver.outputs.version }}"
-          body: |
-            # NexoraOS ${{ steps.ver.outputs.version }}
-
-            Automated build from commit `${{ github.sha }}.
-
-            **ISO size:** ${{ steps.size.outputs.size_mb }} MB
-
-            ## Download
-            - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso` — bootable hybrid ISO (BIOS + UEFI)
-            - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso.sha256sum` — checksum
-            - `build.log` — full archiso build log
-
-            **Note:** If the ISO is missing from this release, it means it exceeded
-            GitHub's 2 GiB release-asset limit. Download it from the
-            [Actions workflow run page](https://github.com/salom600/osbeta/actions/runs/${{ github.run_id }})
-            instead — the ISO is uploaded as a CI artifact (10 GB limit, 30-day retention).
-
-            ## How to use
-            1. Flash the ISO to a USB stick:
-               ```bash
-               sudo dd if=nexora-${{ steps.ver.outputs.version }}-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
-               ```
-               Or use [balenaEtcher](https://etcher.balena.io/) / [Ventoy](https://www.ventoy.net).
-            2. Boot from the USB stick (BIOS or UEFI).
-            3. Click **Install NexoraOS** on the desktop to start the installer.
-
-            ## Minimum specs
-            - 1 GB RAM (low-RAM boot) / 2 GB recommended
-            - 10 GB free disk space
-            - x86_64 CPU (Intel/AMD from 2009+)
-            - BIOS or UEFI
-
-            ## What's preinstalled
-            - NexoraDE (Openbox + Python/GTK3 panel, launcher, settings)
-            - Firefox, PCManFM, LXTerminal, Mousepad
-            - VLC, mpv, GIMP
-            - PipeWire audio, NetworkManager, Bluetooth
-            - Full driver coverage (Intel/AMD/NVIDIA 2009+)
-            - Nexora Store — install more apps (libreoffice, obs-studio, steam,
-              virtualbox, nvidia drivers, dev tools, etc.) from official repos + AUR
-
-            ## Build log
-            Attached: `build.log`
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
-            ${{ steps.build.outputs.iso_path }}
             ${{ steps.build.outputs.iso_sha_path }}
             out/build.log
           draft: false
           prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach ISO to release (only if under 2 GiB)
+        if: ${{ steps.size.outputs.uploadable == 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.make_release == true) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          files: |
+            ${{ steps.build.outputs.iso_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
