@@ -2,10 +2,12 @@
 # NexoraOS — package list for the live ISO (x86_64)
 # -----------------------------------------------
 # ONLY official repo packages (core/extra/multilib) belong here.
-# AUR-only packages (calamares, yay, neofetch, arc-gtk-theme, etc.) are
-# installable post-boot via Nexora Store or our bundled AUR helper.
+# AUR-only packages are installable post-boot via Nexora Store.
 #
-# This list has been verified against the Arch repo state as of 2026-08.
+# The list is intentionally MINIMAL to keep the ISO under 2 GB (GitHub
+# release asset limit). Heavy apps (libreoffice, obs-studio, gcc, rust,
+# jdk, nvidia drivers, virtualbox, etc.) are installable from Nexora Store
+# after boot.
 #
 
 ## ---- base system ----
@@ -23,6 +25,7 @@ archlinux-keyring
 haveged
 intel-ucode
 amd-ucode
+sudo
 
 ## ---- bootloader (BIOS + UEFI) ----
 syslinux
@@ -31,12 +34,10 @@ efibootmgr
 mtools
 memtest86+
 memtest86+-efi
-edk2-shell
 
 ## ---- initramfs / live tooling ----
 mkinitcpio
 mkinitcpio-archiso
-mkinitcpio-nfs-utils
 archiso
 squashfs-tools
 
@@ -69,7 +70,6 @@ iptables
 nftables
 openvpn
 wireguard-tools
-dnsmasq
 traceroute
 mtr
 nmap
@@ -82,15 +82,13 @@ pipewire
 pipewire-pulse
 pipewire-alsa
 pipewire-jack
-pipewire-audio
 wireplumber
 sof-firmware
 alsa-firmware
 alsa-utils
-alsa-tools
 alsa-plugins
 
-## ---- X11 + Wayland ----
+## ---- X11 ----
 xorg-server
 xorg-xinit
 xorg-xrandr
@@ -102,9 +100,6 @@ xorg-xkill
 xorg-xprop
 xorg-xwininfo
 xorg-xdpyinfo
-xorg-xlsfonts
-xorg-fonts-100dpi
-xorg-fonts-75dpi
 xorg-fonts-misc
 xorg-fonts-encodings
 ttf-dejavu
@@ -112,13 +107,11 @@ ttf-liberation
 noto-fonts
 noto-fonts-cjk
 noto-fonts-emoji
-noto-fonts-extra
 freetype2
 fontconfig
 wayland
 wayland-protocols
 xorg-xwayland
-labwc
 
 ## ---- window manager (NexoraDE foundation) ----
 openbox
@@ -133,7 +126,6 @@ python-yaml
 python-pillow
 python-archinstall
 gtk3
-gtk4
 glib2
 gdk-pixbuf2
 pango
@@ -154,7 +146,6 @@ lxappearance
 lxinput
 lxsession
 lxterminal
-sakura
 feh
 hsetroot
 xcompmgr
@@ -163,14 +154,10 @@ arandr
 volumeicon
 gnome-keyring
 libsecret
-seahorse
 file-roller
-engrampa
 galculator
-gedit
 mousepad
 evince
-gpicview
 ristretto
 ffmpeg
 ffmpegthumbnailer
@@ -181,24 +168,13 @@ firefox
 firefox-i18n-en-us
 transmission-gtk
 
-## ---- office / media ----
-libreoffice-fresh
+## ---- media (small footprint) ----
 vlc
 mpv
-audacity
 gimp
-inkscape
-obs-studio
 
-## ---- gaming ----
-steam
-wine
-wine-mono
-wine-gecko
-winetricks
-lutris
+## ---- gaming (minimal; users install full set via Store) ----
 gamemode
-lib32-gamemode
 mesa
 lib32-mesa
 vulkan-radeon
@@ -207,24 +183,9 @@ vulkan-intel
 lib32-vulkan-intel
 vulkan-mesa-layers
 lib32-vulkan-mesa-layers
-nvidia-dkms
-nvidia-utils
-lib32-nvidia-utils
-nvidia-settings
 libva
 libva-mesa-driver
 intel-media-driver
-
-## ---- virtualization ----
-virtualbox
-virtualbox-host-dkms
-virtualbox-guest-iso
-qemu-desktop
-libvirt
-virt-manager
-ebtables
-openbsd-netcat
-spice-vdagent
 
 ## ---- drivers (broad 2009+ coverage) ----
 xf86-video-amdgpu
@@ -236,7 +197,6 @@ xf86-video-fbdev
 xf86-input-libinput
 xf86-input-evdev
 xf86-input-synaptics
-xf86-input-void
 libinput
 acpid
 acpi
@@ -246,101 +206,54 @@ thermald
 smartmontools
 dmidecode
 lshw
-hwinfo
 inxi
 usbutils
 pciutils
-dmraid
-mdadm
 nvme-cli
 
-## ---- power / laptop ----
+## ---- power ----
 upower
 powertop
 
-## ---- fonts / i18n ----
+## ---- fonts ----
 ttf-ubuntu-font-family
 ttf-roboto
-ttf-croscore
 ttf-jetbrains-mono
 ttf-fira-code
-ttf-fira-mono
-ttf-hack
 ttf-nerd-fonts-symbols
 
 ## ---- themes / icons ----
 papirus-icon-theme
-breeze-gtk
 breeze-icons
 hicolor-icon-theme
 adwaita-icon-theme
-gnome-themes-extra
 
 ## ---- installer + tools ----
-qt5-svg
-qt5ct
 polkit
 polkit-gnome
 gvfs
 gvfs-mtp
 gvfs-smb
-gvfs-afc
-gvfs-gphoto2
-gvfs-goa
-gvfs-nfs
 
-## ---- security / system ----
+## ---- security ----
 ufw
 gufw
 firejail
 apparmor
-openssh
 fail2ban
 keepassxc
 gnupg
 pinentry
-seahorse
-pkgstats
 
-## ---- development tools ----
+## ---- development tools (minimal — keep gcc/make for DKM builds) ----
 git
 github-cli
-git-lfs
-subversion
-mercurial
 gcc
-clang
-cmake
 make
 pkgconf
-strace
-ltrace
-gdb
-valgrind
-python-pyflakes
-python-pylint
-python-black
-python-isort
-nodejs
-npm
-yarn
-rust
-go
-jdk-openjdk
-jdk17-openjdk
-perl
-ruby
-lua
-luarocks
-php
-composer
-
-## ---- text editors ----
 vim
 neovim
 nano
-emacs
-micro
 
 ## ---- shell extras ----
 bash-completion
@@ -351,7 +264,6 @@ zsh-autosuggestions
 fish
 starship
 tmux
-screen
 htop
 btop
 fastfetch
@@ -362,14 +274,10 @@ ripgrep
 fzf
 tree
 jq
-yq
 p7zip
 unrar
 unzip
 zip
-xz
-gzip
-bzip2
 tar
 
 ## ---- documentation ----

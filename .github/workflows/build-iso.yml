@@ -139,6 +139,24 @@ jobs:
           compression-level: 0
 
       # ---- 6. Create release (only on push to main or explicit dispatch) ----
+      - name: Check ISO size against GitHub release limit
+        id: size
+        run: |
+          ISO="${{ steps.build.outputs.iso_path }}"
+          SIZE_BYTES=$(stat -c %s "$ISO")
+          SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
+          echo "size_bytes=$SIZE_BYTES" >> "$GITHUB_OUTPUT"
+          echo "size_mb=$SIZE_MB" >> "$GITHUB_OUTPUT"
+          # GitHub release asset limit is 2 GiB = 2147483648 bytes
+          if [ "$SIZE_BYTES" -lt 2147483648 ]; then
+            echo "uploadable=true" >> "$GITHUB_OUTPUT"
+            echo "ISO is ${SIZE_MB} MB — under 2 GiB limit, will upload to release."
+          else
+            echo "uploadable=false" >> "$GITHUB_OUTPUT"
+            echo "ISO is ${SIZE_MB} MB — exceeds 2 GiB GitHub release limit."
+            echo "The ISO will still be available as a CI artifact (10 GB limit)."
+          fi
+
       - name: Create GitHub release
         if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.make_release == true }}
         uses: softprops/action-gh-release@v2
@@ -148,11 +166,19 @@ jobs:
           body: |
             # NexoraOS ${{ steps.ver.outputs.version }}
 
-            Automated build from commit `${{ github.sha }}`.
+            Automated build from commit `${{ github.sha }}.
+
+            **ISO size:** ${{ steps.size.outputs.size_mb }} MB
 
             ## Download
             - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso` — bootable hybrid ISO (BIOS + UEFI)
             - `nexora-${{ steps.ver.outputs.version }}-x86_64.iso.sha256sum` — checksum
+            - `build.log` — full archiso build log
+
+            **Note:** If the ISO is missing from this release, it means it exceeded
+            GitHub's 2 GiB release-asset limit. Download it from the
+            [Actions workflow run page](https://github.com/salom600/osbeta/actions/runs/${{ github.run_id }})
+            instead — the ISO is uploaded as a CI artifact (10 GB limit, 30-day retention).
 
             ## How to use
             1. Flash the ISO to a USB stick:
@@ -161,13 +187,22 @@ jobs:
                ```
                Or use [balenaEtcher](https://etcher.balena.io/) / [Ventoy](https://www.ventoy.net).
             2. Boot from the USB stick (BIOS or UEFI).
-            3. Click **Install NexoraOS** on the desktop to start Calamares.
+            3. Click **Install NexoraOS** on the desktop to start the installer.
 
             ## Minimum specs
             - 1 GB RAM (low-RAM boot) / 2 GB recommended
             - 10 GB free disk space
             - x86_64 CPU (Intel/AMD from 2009+)
             - BIOS or UEFI
+
+            ## What's preinstalled
+            - NexoraDE (Openbox + Python/GTK3 panel, launcher, settings)
+            - Firefox, PCManFM, LXTerminal, Mousepad
+            - VLC, mpv, GIMP
+            - PipeWire audio, NetworkManager, Bluetooth
+            - Full driver coverage (Intel/AMD/NVIDIA 2009+)
+            - Nexora Store — install more apps (libreoffice, obs-studio, steam,
+              virtualbox, nvidia drivers, dev tools, etc.) from official repos + AUR
 
             ## Build log
             Attached: `build.log`
