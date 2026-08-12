@@ -38,6 +38,7 @@ rm -rf "$WORK_DIR" .build
 rm -rf config/packages.chroot/*.deb 2>/dev/null || true
 
 # ---- 2. Install custom kernel .deb packages (if present) ----
+mkdir -p config/packages.chroot
 if [ -d "$KERNEL_DIR" ] && ls "$KERNEL_DIR"/*.deb >/dev/null 2>&1; then
     echo "==> Installing custom kernel .deb packages..."
     cp "$KERNEL_DIR"/*.deb config/packages.chroot/
