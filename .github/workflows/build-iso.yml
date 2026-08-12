@@ -204,6 +204,13 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          # Create labels if they don't exist (idempotent)
+          for spec in "build-failure,d73a4a" "auto-fix,fbca04" "automated,bfdadc"; do
+            name="${spec%%,*}"
+            color="${spec##*,}"
+            gh label create "$name" --color "$color" --description "Auto-applied by CI" --force 2>/dev/null || true
+          done
+
           BODY=$(cat <<EOF
           ## 🚧 Build failure
 
@@ -224,8 +231,11 @@ jobs:
           [Re-run failed jobs](${RUN_URL})
           EOF
           )
+          # gh issue create accepts ONE label per --label flag
           gh issue create \
             --title "🚧 Build failure on \`${COMMIT_SHA::7}\`" \
             --body "$BODY" \
-            --label "build-failure,auto-fix,automated" \
+            --label "build-failure" \
+            --label "auto-fix" \
+            --label "automated" \
             --assignee salom600

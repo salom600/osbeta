@@ -18,10 +18,11 @@ buildmodes=('iso')
 
 # Bootloaders — we want both BIOS (syslinux/isolinux) and UEFI (systemd-boot)
 # and we also produce a USB-bootable hybrid ISO.
-bootmodes=('bios.syslinux.mbr'
-           'bios.syslinux.eltorito'
-           'uefi.systemd-boot.esp'
-           'uefi.systemd-boot.eltorito')
+# Note: in archiso >= 67, bios.syslinux.mbr/.eltorito were merged into bios.syslinux,
+# and the UEFI modes require the -x64 suffix.
+bootmodes=('bios.syslinux'
+           'uefi-x64.systemd-boot.esp'
+           'uefi-x64.systemd-boot.eltorito')
 
 # Arch — only x86_64 for now; can extend to aarch64 in a matrix later
 arch="x86_64"
