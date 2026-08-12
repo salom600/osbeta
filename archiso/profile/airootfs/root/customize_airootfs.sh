@@ -29,6 +29,10 @@ ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 
 # ---- 3. Live user: nexora ----
 echo "==> Creating live user 'nexora'..."
+# Ensure all groups exist before we try to add the user to them.
+for g in wheel storage power network video audio input lp autologin; do
+    groupadd -f "$g" 2>/dev/null || true
+done
 if ! id nexora &>/dev/null; then
     useradd -m -G wheel,storage,power,network,video,audio,input,lp,autologin -s /bin/bash nexora
     echo 'nexora:nexora' | chpasswd
